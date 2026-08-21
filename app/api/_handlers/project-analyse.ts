@@ -3,8 +3,6 @@ import { getProject, saveProject } from '@/lib/db';
 import { now } from '@/lib/utils';
 import { enqueueAnalysis } from '@/services/queue';
 
-export const runtime = 'nodejs';
-
 export async function POST(_: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   const project = getProject(id);

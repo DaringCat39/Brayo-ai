@@ -3,9 +3,6 @@ import { DATA_DIR } from '@/lib/paths';
 import { ffmpegReady } from '@/services/ffmpeg';
 import { publicIntegrationStatuses } from '@/lib/integrations';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
 export async function GET() {
   return NextResponse.json({
     settings: {

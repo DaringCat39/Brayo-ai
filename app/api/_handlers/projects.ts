@@ -11,9 +11,6 @@ import { projectDir } from '@/lib/paths';
 import { now, safeFilename, titleFromFilename } from '@/lib/utils';
 import { enqueueAnalysis } from '@/services/queue';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
 const allowedExtensions = new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v']);
 
 export async function GET() {

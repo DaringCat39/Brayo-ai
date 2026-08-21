@@ -3,9 +3,6 @@ import { getProject, saveProject } from '@/lib/db';
 import type { CaptionSettings, Project } from '@/types';
 import { CLIP_DURATION_OPTIONS } from '@/lib/clip-duration';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
 export async function GET(_: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   const project = getProject(id);

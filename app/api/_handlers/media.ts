@@ -5,9 +5,6 @@ import { Readable } from 'node:stream';
 import { NextRequest } from 'next/server';
 import { projectDir } from '@/lib/paths';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
 const contentTypes: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',

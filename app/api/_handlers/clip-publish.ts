@@ -3,8 +3,6 @@ import { getProject, saveProject } from '@/lib/db';
 import { publishClip } from '@/services/publishing';
 import type { PublishingProvider } from '@/types';
 
-export const runtime = 'nodejs';
-
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string; clipId: string }> }) {
   const { id, clipId } = await context.params;
   const project = getProject(id);

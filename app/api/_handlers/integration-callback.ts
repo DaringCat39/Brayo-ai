@@ -3,8 +3,6 @@ import { getIntegrationAccount, saveIntegrationAccount } from '@/lib/db';
 import { integrationConfig } from '@/lib/integrations';
 import type { PublishingProvider } from '@/types';
 
-export const runtime = 'nodejs';
-
 function isProvider(value: string): value is PublishingProvider {
   return value === 'youtube' || value === 'tiktok';
 }

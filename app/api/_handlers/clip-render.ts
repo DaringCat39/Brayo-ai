@@ -3,8 +3,6 @@ import { getProject } from '@/lib/db';
 import { enqueueRender } from '@/services/queue';
 import { effectiveClipDuration, MIN_CLIP_SECONDS } from '@/lib/clip-duration';
 
-export const runtime = 'nodejs';
-
 export async function POST(_: NextRequest, context: { params: Promise<{ id: string; clipId: string }> }) {
   const { id, clipId } = await context.params;
   const project = getProject(id);

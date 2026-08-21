@@ -10,8 +10,6 @@ import { projectDir } from '@/lib/paths';
 import { safeFilename } from '@/lib/utils';
 import { probeAudio } from '@/services/ffmpeg';
 
-export const runtime = 'nodejs';
-
 const allowedExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac']);
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {

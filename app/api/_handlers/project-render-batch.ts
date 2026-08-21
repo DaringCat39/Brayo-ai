@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getProject } from '@/lib/db';
 import { enqueueRender } from '@/services/queue';
 
-export const runtime = 'nodejs';
-
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   const project = getProject(id);

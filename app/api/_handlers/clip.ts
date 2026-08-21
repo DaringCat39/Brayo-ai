@@ -4,8 +4,6 @@ import type { Clip } from '@/types';
 import { clamp } from '@/lib/utils';
 import { requiredClipDuration } from '@/lib/clip-duration';
 
-export const runtime = 'nodejs';
-
 const allowedKeys: Array<keyof Clip> = [
   'title',
   'hook',
