@@ -12,8 +12,10 @@ import * as project from '@/app/api/_handlers/project';
 import * as projectAnalyse from '@/app/api/_handlers/project-analyse';
 import * as projectMusic from '@/app/api/_handlers/project-music';
 import * as projectRenderBatch from '@/app/api/_handlers/project-render-batch';
+import * as projectSource from '@/app/api/_handlers/project-source';
 import * as projects from '@/app/api/_handlers/projects';
 import * as settings from '@/app/api/_handlers/settings';
+import * as uploads from '@/app/api/_handlers/uploads';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -42,6 +44,15 @@ async function dispatch(request: NextRequest, context: CatchAllContext) {
 
   if (path.length === 1 && path[0] === 'settings') {
     return runMethod(request, { GET: () => settings.GET() });
+  }
+
+  if (path[0] === 'uploads') {
+    if (path.length === 1) {
+      return runMethod(request, { GET: () => uploads.GET() });
+    }
+    if (path.length === 2 && path[1] === 'token') {
+      return runMethod(request, { POST: () => uploads.POST(request) });
+    }
   }
 
   if (path[0] === 'integrations') {
@@ -86,6 +97,9 @@ async function dispatch(request: NextRequest, context: CatchAllContext) {
     }
     if (path.length === 3 && path[2] === 'analyse') {
       return runMethod(request, { POST: () => projectAnalyse.POST(request, projectContext) });
+    }
+    if (path.length === 3 && path[2] === 'source') {
+      return runMethod(request, { GET: () => projectSource.GET(request, projectContext) });
     }
     if (path.length === 3 && path[2] === 'music') {
       return runMethod(request, { POST: () => projectMusic.POST(request, projectContext) });

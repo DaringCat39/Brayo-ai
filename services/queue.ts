@@ -7,6 +7,7 @@ import { renderClip } from '@/services/ffmpeg';
 import { effectiveClipDuration, MIN_CLIP_SECONDS } from '@/lib/clip-duration';
 import { publishClip } from '@/services/publishing';
 import type { PublishingProvider } from '@/types';
+import { materializeVideo } from '@/services/storage';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -53,11 +54,12 @@ async function runRender(projectId: string, clipId: string) {
       saveProject(project);
       const filename = `export-${clip.id}.mp4`;
       const outputPath = path.join(projectDir(project.id), filename);
+      const sourcePath = await materializeVideo(project.video);
       const musicPath = clip.music?.enabled
         ? project.musicTracks?.find((track) => track.id === clip.music.trackId)?.storedPath
         : undefined;
       let lastSaved = 0;
-      await renderClip(project.video.storedPath, clip, project.transcript, musicPath, outputPath, (progress) => {
+      await renderClip(sourcePath, clip, project.transcript, musicPath, outputPath, (progress) => {
         clip.renderProgress = progress;
         project.job.progress = progress;
         if (progress - lastSaved >= 3 || progress === 100) {

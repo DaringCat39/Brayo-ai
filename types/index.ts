@@ -13,9 +13,30 @@ export type FramingMode = 'auto' | 'face' | 'centre' | 'split' | 'original';
 export type EditStyle = 'clean' | 'viral' | 'cinematic' | 'meme' | 'podcast' | 'gaming';
 export type ClipCategory = 'Funny' | 'Emotional' | 'Informative' | 'Controversial' | 'Story' | 'Quote' | 'High energy';
 
+export type UploadStorageProvider = 'local' | 'vercel-blob';
+
+export interface UploadCapabilities {
+  provider: UploadStorageProvider;
+  direct: boolean;
+  multipart: boolean;
+  localFallback: boolean;
+}
+
+export interface CompletedVideoUpload {
+  provider: Exclude<UploadStorageProvider, 'local'>;
+  url: string;
+  pathname: string;
+  contentType: string;
+  size: number;
+  etag: string;
+}
+
 export interface VideoMetadata {
   filename: string;
   storedPath: string;
+  storageProvider?: UploadStorageProvider;
+  storageUrl?: string;
+  storageKey?: string;
   size: number;
   duration: number;
   width: number;

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@vercel/blob": "^2.8.0",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",
     "lucide-react": "^0.468.0",

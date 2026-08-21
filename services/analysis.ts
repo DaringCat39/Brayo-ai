@@ -9,6 +9,7 @@ import { createThumbnail, detectSilence, extractAudio, probeVideo } from '@/serv
 import { transcribeAudio } from '@/services/transcription';
 import { scoreTranscriptWithAi, type AiCandidate } from '@/services/ai/provider';
 import { localTrendHeuristics } from '@/services/trends';
+import { materializeVideo } from '@/services/storage';
 
 const categories: ClipCategory[] = ['Story', 'Quote', 'Informative', 'Emotional', 'High energy', 'Funny', 'Controversial'];
 
@@ -143,10 +144,18 @@ export async function analyseProject(projectId: string) {
   if (!project) return;
   try {
     const sourceVideo = project.video;
-    const sourcePath = sourceVideo?.storedPath;
-    if (!sourceVideo || !sourcePath) throw new Error('The uploaded source file could not be located.');
+    if (!sourceVideo) throw new Error('The uploaded source file could not be located.');
+    if (sourceVideo.storageProvider === 'vercel-blob') {
+      update(project, 4, 'Preparing source', 'Streaming the completed upload from object storage for FFmpeg');
+    }
+    const sourcePath = await materializeVideo(sourceVideo);
     update(project, 7, 'Probing video', 'Reading codec, frame rate, resolution and duration');
-    project.video = await probeVideo(sourcePath, sourceVideo.filename, sourceVideo.size);
+    project.video = {
+      ...await probeVideo(sourcePath, sourceVideo.filename, sourceVideo.size),
+      storageProvider: sourceVideo.storageProvider,
+      storageUrl: sourceVideo.storageUrl,
+      storageKey: sourceVideo.storageKey,
+    };
     update(project, 16, 'Creating preview', 'Extracting a local project thumbnail');
     const directory = projectDir(project.id);
     const projectThumbnail = path.join(directory, 'thumbnail.jpg');

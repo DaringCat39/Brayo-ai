@@ -1,11 +1,13 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { upload as uploadBlob } from '@vercel/blob/client';
 import { ArrowUp, Captions, Clock3, FileVideo, LockKeyhole, UploadCloud, X } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
-import type { CaptionSettings, Project } from '@/types';
+import type { CaptionSettings, CompletedVideoUpload, Project, UploadCapabilities } from '@/types';
 import { DEFAULT_CLIP_SECONDS } from '@/lib/clip-duration';
+import { BLOB_VIDEO_PREFIX } from '@/lib/upload-config';
 
 const accepted = '.mp4,.mov,.mkv,.webm,.m4v,video/mp4,video/quicktime,video/webm,video/x-matroska';
 const durationOptions: Array<{ value: Project['preferredDuration']; label: string; detail: string }> = [
@@ -31,10 +33,26 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [uploadSpeed, setUploadSpeed] = useState(0);
+  const [uploadStage, setUploadStage] = useState('Ready to upload');
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [duration, setDuration] = useState<Project['preferredDuration']>(DEFAULT_CLIP_SECONDS);
   const [captionPreset, setCaptionPreset] = useState<CaptionSettings['preset']>('bold');
+  const [capabilities, setCapabilities] = useState<UploadCapabilities | null>(null);
+  const uploadStartedAt = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/uploads', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Upload service is unavailable.');
+        return response.json() as Promise<UploadCapabilities>;
+      })
+      .then((next) => { if (active) setCapabilities(next); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   function pick(next: File | undefined) {
     if (!next) return;
@@ -47,39 +65,103 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
     setFile(next);
   }
 
-  function upload() {
+  function reportProgress(loaded: number, total: number, percentage?: number) {
+    const elapsedSeconds = Math.max(0.05, (performance.now() - uploadStartedAt.current) / 1000);
+    setProgress(Math.max(0, Math.min(100, Math.round(percentage ?? (loaded / Math.max(1, total)) * 100))));
+    setUploadSpeed(loaded / elapsedSeconds);
+  }
+
+  async function getCapabilities() {
+    if (capabilities) return capabilities;
+    const response = await fetch('/api/uploads', { cache: 'no-store' });
+    if (!response.ok) throw new Error('The upload service is unavailable. Please try again.');
+    const next = await response.json() as UploadCapabilities;
+    setCapabilities(next);
+    return next;
+  }
+
+  function registerLocalUpload(video: File) {
+    return new Promise<Project>((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', '/api/projects');
+      request.setRequestHeader('x-file-name', encodeURIComponent(video.name));
+      request.setRequestHeader('content-type', video.type || 'application/octet-stream');
+      request.setRequestHeader('x-clip-duration', String(duration));
+      request.setRequestHeader('x-caption-preset', captionPreset);
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) reportProgress(event.loaded, event.total);
+      };
+      request.onerror = () => reject(new Error('Upload interrupted. Your existing projects are unaffected.'));
+      request.onload = () => {
+        try {
+          const body = JSON.parse(request.responseText) as { project?: Project; error?: string };
+          if (request.status >= 200 && request.status < 300 && body.project) resolve(body.project);
+          else reject(new Error(body.error || 'Upload failed.'));
+        } catch {
+          reject(new Error('The server returned an unexpected response.'));
+        }
+      };
+      request.send(video);
+    });
+  }
+
+  async function registerDirectUpload(video: File) {
+    const blobFilename = video.name
+      .normalize('NFKD')
+      .replace(/[^a-zA-Z0-9._-]/g, '-')
+      .replace(/-+/g, '-')
+      .slice(-140);
+    const blob = await uploadBlob(`${BLOB_VIDEO_PREFIX}${blobFilename}`, video, {
+      access: 'private',
+      handleUploadUrl: '/api/uploads/token',
+      contentType: video.type || 'application/octet-stream',
+      multipart: true,
+      onUploadProgress: ({ loaded, total, percentage }) => reportProgress(loaded, total, percentage),
+    });
+
+    setProgress(100);
+    setUploadSpeed(0);
+    setUploadStage('Finalising project');
+    const upload: CompletedVideoUpload = {
+      provider: 'vercel-blob',
+      url: blob.url,
+      pathname: blob.pathname,
+      contentType: blob.contentType,
+      size: video.size,
+      etag: blob.etag,
+    };
+    const response = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: video.name, preferredDuration: duration, captionPreset, upload }),
+    });
+    const body = await response.json() as { project?: Project; error?: string };
+    if (!response.ok || !body.project) throw new Error(body.error || 'The uploaded video could not be registered.');
+    return body.project;
+  }
+
+  async function upload() {
     if (!file || uploading) return;
     setUploading(true);
     setError('');
-    const request = new XMLHttpRequest();
-    request.open('POST', '/api/projects');
-    request.setRequestHeader('x-file-name', encodeURIComponent(file.name));
-    request.setRequestHeader('content-type', file.type || 'application/octet-stream');
-    request.setRequestHeader('x-clip-duration', String(duration));
-    request.setRequestHeader('x-caption-preset', captionPreset);
-    request.upload.onprogress = (event) => {
-      if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100));
-    };
-    request.onerror = () => {
-      setUploading(false);
-      setError('Upload interrupted. Your existing projects are unaffected.');
-    };
-    request.onload = () => {
-      try {
-        const body = JSON.parse(request.responseText) as { project?: { id: string }; error?: string };
-        if (request.status >= 200 && request.status < 300 && body.project) {
-          setProgress(100);
-          router.push(`/projects/${body.project.id}`);
-        } else {
-          setUploading(false);
-          setError(body.error || 'Upload failed.');
-        }
-      } catch {
-        setUploading(false);
-        setError('The server returned an unexpected response.');
+    setProgress(0);
+    setUploadSpeed(0);
+    uploadStartedAt.current = performance.now();
+    try {
+      const storage = await getCapabilities();
+      if (!storage.direct && !storage.localFallback) {
+        throw new Error('Video storage is not connected. Add a private Vercel Blob store to this deployment.');
       }
-    };
-    request.send(file);
+      setUploadStage(storage.direct ? 'Uploading directly to storage' : 'Uploading to local server');
+      const project = storage.direct ? await registerDirectUpload(file) : await registerLocalUpload(file);
+      setProgress(100);
+      setUploadStage('Preparing analysis');
+      router.push(`/projects/${project.id}`);
+    } catch (uploadError) {
+      setUploading(false);
+      setUploadSpeed(0);
+      setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.');
+    }
   }
 
   if (file) {
@@ -93,7 +175,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-white">{file.name}</p>
-                <p className="mt-1 text-xs text-white/35">{formatBytes(file.size)} · Ready for local analysis</p>
+                <p className="mt-1 text-xs text-white/35">{formatBytes(file.size)} · Ready for secure upload</p>
               </div>
               {!uploading && (
                 <button onClick={() => setFile(null)} className="grid h-8 w-8 place-items-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white" aria-label="Remove video">
@@ -103,7 +185,10 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
             </div>
             {uploading && (
               <div className="mt-3">
-                <div className="mb-1.5 flex justify-between text-[10px] font-medium uppercase tracking-wider text-white/38"><span>{progress === 100 ? 'Preparing analysis' : 'Uploading locally'}</span><span>{progress}%</span></div>
+                <div className="mb-1.5 flex justify-between gap-3 text-[10px] font-medium uppercase tracking-wider text-white/38">
+                  <span className="truncate">{uploadStage}</span>
+                  <span className="shrink-0">{progress}%{uploadSpeed > 0 ? ` · ${formatBytes(uploadSpeed)}/s` : ''}</span>
+                </div>
                 <div className="relative h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
                   <div className="h-full rounded-full bg-gradient-to-r from-violet to-lime transition-all duration-300" style={{ width: `${progress}%` }} />
                 </div>
@@ -166,7 +251,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
       </span>
       <span className="mt-5 block text-center text-base font-medium">Drop your long-form video here</span>
       <span className="mt-2 block text-center text-sm text-white/35">or click to browse · MP4, MOV, MKV, WebM</span>
-      <span className="mt-5 flex items-center justify-center gap-1.5 text-[11px] text-white/25"><LockKeyhole className="h-3 w-3" /> Stored and processed locally</span>
+      <span className="mt-5 flex items-center justify-center gap-1.5 text-[11px] text-white/25"><LockKeyhole className="h-3 w-3" /> Private direct upload · local development fallback</span>
       {dragging && <span className="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-violet via-lime to-violet" />}
     </button>
   );
