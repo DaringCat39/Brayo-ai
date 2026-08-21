@@ -3,7 +3,9 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { NextRequest } from 'next/server';
-import { projectDir } from '@/lib/paths';
+import { getProject } from '@/lib/persistence';
+import { IS_VERCEL, projectWorkspacePath } from '@/lib/paths';
+import { signedBlobReadUrl } from '@/services/storage';
 
 const contentTypes: Record<string, string> = {
   '.mp4': 'video/mp4',
@@ -24,7 +26,18 @@ const contentTypes: Record<string, string> = {
 export async function GET(request: NextRequest, context: { params: Promise<{ projectId: string; filename: string }> }) {
   const { projectId, filename } = await context.params;
   if (filename !== path.basename(filename)) return new Response('Invalid path.', { status: 400 });
-  const directory = projectDir(projectId);
+  if (IS_VERCEL) {
+    const project = await getProject(projectId);
+    const artifact = project?.media?.[filename];
+    if (!artifact) return new Response('File not found.', { status: 404 });
+    try {
+      const signedUrl = await signedBlobReadUrl(artifact.pathname, request.nextUrl.searchParams.get('download') === '1');
+      return Response.redirect(signedUrl, 307);
+    } catch {
+      return new Response('File not found.', { status: 404 });
+    }
+  }
+  const directory = projectWorkspacePath(projectId);
   const filePath = path.resolve(directory, filename);
   if (!filePath.startsWith(path.resolve(directory) + path.sep)) return new Response('Invalid path.', { status: 400 });
   try {

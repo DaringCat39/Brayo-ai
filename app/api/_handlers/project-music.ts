@@ -5,16 +5,17 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { unlink } from 'node:fs/promises';
 import { NextRequest, NextResponse } from 'next/server';
-import { getProject, saveProject } from '@/lib/db';
-import { projectDir } from '@/lib/paths';
+import { getProject, saveProject } from '@/lib/persistence';
+import { IS_VERCEL, projectDir } from '@/lib/paths';
 import { safeFilename } from '@/lib/utils';
 import { probeAudio } from '@/services/ffmpeg';
+import { persistProjectMedia } from '@/services/storage';
 
 const allowedExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac']);
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const project = getProject(id);
+  const project = await getProject(id);
   if (!project) return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
   if (!request.body) return NextResponse.json({ error: 'No audio data received.' }, { status: 400 });
   let filename = request.headers.get('x-file-name') || 'music.mp3';
@@ -36,16 +37,26 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     await unlink(storedPath).catch(() => undefined);
     return NextResponse.json({ error: error instanceof Error ? error.message : 'This audio file could not be played.' }, { status: 415 });
   }
-  project.musicTracks ||= [];
-  const track = {
-    id: trackId,
-    name: safeFilename(filename).replace(/\.[^/.]+$/, '').replace(/-/g, ' '),
-    filename: safeFilename(filename),
-    storedPath,
-    url: `/api/media/${id}/${storedFilename}`,
-    duration,
+  const contentTypes: Record<string, string> = {
+    '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.flac': 'audio/flac',
   };
-  project.musicTracks.push(track);
-  saveProject(project);
-  return NextResponse.json({ project, track }, { status: 201 });
+  try {
+    const storage = await persistProjectMedia(project, storedFilename, storedPath, contentTypes[extension] || 'application/octet-stream');
+    project.musicTracks ||= [];
+    const track = {
+      id: trackId,
+      name: safeFilename(filename).replace(/\.[^/.]+$/, '').replace(/-/g, ' '),
+      filename: safeFilename(filename),
+      storedPath,
+      url: `/api/media/${id}/${storedFilename}`,
+      storage: storage || undefined,
+      duration,
+    };
+    project.musicTracks.push(track);
+    await saveProject(project);
+    return NextResponse.json({ project, track }, { status: 201 });
+  } finally {
+    if (IS_VERCEL) await unlink(storedPath).catch(() => undefined);
+  }
 }

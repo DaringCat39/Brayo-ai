@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getProject } from '@/lib/db';
+import { getProject } from '@/lib/persistence';
 import { enqueueRender } from '@/services/queue';
 import { effectiveClipDuration, MIN_CLIP_SECONDS } from '@/lib/clip-duration';
 
 export async function POST(_: NextRequest, context: { params: Promise<{ id: string; clipId: string }> }) {
   const { id, clipId } = await context.params;
-  const project = getProject(id);
+  const project = await getProject(id);
   const clip = project?.clips.find((item) => item.id === clipId);
   if (!project || !clip) {
     return NextResponse.json({ error: 'Clip not found.' }, { status: 404 });

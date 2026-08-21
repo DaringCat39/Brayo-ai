@@ -1,4 +1,4 @@
-import { getIntegrationAccount, saveIntegrationAccount, type StoredIntegrationAccount } from '@/lib/db';
+import { getIntegrationAccount, saveIntegrationAccount, type StoredIntegrationAccount } from '@/lib/persistence';
 import type { IntegrationStatus, PublishingProvider } from '@/types';
 
 export function integrationConfig(provider: PublishingProvider) {
@@ -14,9 +14,9 @@ export function integrationConfig(provider: PublishingProvider) {
   };
 }
 
-export function integrationStatus(provider: PublishingProvider): IntegrationStatus {
+export async function integrationStatus(provider: PublishingProvider): Promise<IntegrationStatus> {
   const config = integrationConfig(provider);
-  const account = getIntegrationAccount(provider);
+  const account = await getIntegrationAccount(provider);
   return {
     provider,
     configured: Boolean(config.clientId && config.clientSecret),
@@ -26,8 +26,8 @@ export function integrationStatus(provider: PublishingProvider): IntegrationStat
   };
 }
 
-export function publicIntegrationStatuses() {
-  return [integrationStatus('youtube'), integrationStatus('tiktok')];
+export async function publicIntegrationStatuses() {
+  return Promise.all([integrationStatus('youtube'), integrationStatus('tiktok')]);
 }
 
 async function parseError(response: Response) {
@@ -57,7 +57,7 @@ async function refreshAccount(account: StoredIntegrationAccount): Promise<Stored
   });
   if (!response.ok) throw new Error(await parseError(response));
   const token = await response.json() as { access_token: string; expires_in: number; refresh_token?: string; scope?: string };
-  return saveIntegrationAccount({
+  return await saveIntegrationAccount({
     ...account,
     accessToken: token.access_token,
     refreshToken: token.refresh_token || account.refreshToken,
@@ -67,7 +67,7 @@ async function refreshAccount(account: StoredIntegrationAccount): Promise<Stored
 }
 
 export async function validAccessToken(provider: PublishingProvider) {
-  const account = getIntegrationAccount(provider);
+  const account = await getIntegrationAccount(provider);
   if (!account) throw new Error(`${provider === 'youtube' ? 'YouTube' : 'TikTok'} is not connected.`);
   const current = account.expiresAt > Date.now() + 300_000 ? account : await refreshAccount(account);
   return current.accessToken;

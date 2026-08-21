@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { access, writeFile } from 'node:fs/promises';
+import { access, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
@@ -457,13 +457,17 @@ export async function renderClip(
     outputPath,
   );
   let buffer = '';
-  await runProcess(ffmpegPath, args, (chunk) => {
-    buffer = (buffer + chunk).slice(-2400);
-    const matches = [...buffer.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
-    const latest = matches.at(-1);
-    if (!latest) return;
-    const elapsed = Number(latest[1]) * 3600 + Number(latest[2]) * 60 + Number(latest[3]);
-    onProgress(clamp(Math.round((elapsed / outputDuration) * 100), 1, 99));
-  });
-  onProgress(100);
+  try {
+    await runProcess(ffmpegPath, args, (chunk) => {
+      buffer = (buffer + chunk).slice(-2400);
+      const matches = [...buffer.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
+      const latest = matches.at(-1);
+      if (!latest) return;
+      const elapsed = Number(latest[1]) * 3600 + Number(latest[2]) * 60 + Number(latest[3]);
+      onProgress(clamp(Math.round((elapsed / outputDuration) * 100), 1, 99));
+    });
+    onProgress(100);
+  } finally {
+    await unlink(subtitlePath).catch(() => undefined);
+  }
 }

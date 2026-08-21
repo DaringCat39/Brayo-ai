@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getIntegrationAccount, saveIntegrationAccount } from '@/lib/db';
+import { getIntegrationAccount, saveIntegrationAccount } from '@/lib/persistence';
 import { integrationConfig } from '@/lib/integrations';
 import type { PublishingProvider } from '@/types';
 
@@ -58,15 +58,16 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
     // password access is needed for ViralCut to publish finished videos.
     const label = value === 'youtube' ? 'YouTube channel' : 'TikTok account';
 
-    saveIntegrationAccount({
+    const existingAccount = await getIntegrationAccount(value);
+    await saveIntegrationAccount({
       provider: value,
       accessToken: token.access_token,
-      refreshToken: token.refresh_token || getIntegrationAccount(value)?.refreshToken,
+      refreshToken: token.refresh_token || existingAccount?.refreshToken,
       expiresAt: Date.now() + (token.expires_in || 3600) * 1000,
       label,
       accountId: token.open_id,
       scope: token.scope,
-      autoPublish: getIntegrationAccount(value)?.autoPublish ?? true,
+      autoPublish: existingAccount?.autoPublish ?? true,
     });
     const response = settingsRedirect(request, `connected=${value}`);
     response.cookies.delete(`viralcut_${value}_oauth`);

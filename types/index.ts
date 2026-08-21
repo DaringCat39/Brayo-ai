@@ -31,6 +31,15 @@ export interface CompletedVideoUpload {
   etag: string;
 }
 
+export interface StoredMediaArtifact {
+  provider: 'vercel-blob';
+  url: string;
+  pathname: string;
+  contentType: string;
+  size: number;
+  etag: string;
+}
+
 export interface VideoMetadata {
   filename: string;
   storedPath: string;
@@ -85,6 +94,7 @@ export interface MusicTrack {
   filename: string;
   storedPath: string;
   url: string;
+  storage?: StoredMediaArtifact;
   duration?: number;
 }
 
@@ -180,6 +190,7 @@ export interface Project {
   clips: Clip[];
   transcript: TranscriptSegment[];
   musicTracks?: MusicTrack[];
+  media?: Record<string, StoredMediaArtifact>;
   transcriptionMode: 'pending' | 'local-whisper' | 'built-in-whisper' | 'openai' | 'signal-only';
   preferredDuration: 75 | 90 | 120 | 180;
   defaultCaptionPreset?: CaptionSettings['preset'];

@@ -1,13 +1,13 @@
 import path from 'node:path';
-import { getIntegrationAccount, getProject, saveProject } from '@/lib/db';
-import { projectDir } from '@/lib/paths';
+import { getIntegrationAccount, getProject, saveProject } from '@/lib/persistence';
+import { cleanupProjectWorkspace, projectDir } from '@/lib/paths';
 import { now } from '@/lib/utils';
 import { analyseProject } from '@/services/analysis';
 import { renderClip } from '@/services/ffmpeg';
 import { effectiveClipDuration, MIN_CLIP_SECONDS } from '@/lib/clip-duration';
 import { publishClip } from '@/services/publishing';
 import type { PublishingProvider } from '@/types';
-import { materializeVideo } from '@/services/storage';
+import { materializeProjectMedia, materializeVideo, persistProjectMedia } from '@/services/storage';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -32,7 +32,7 @@ export function enqueueAnalysis(projectId: string) {
 
 async function runRender(projectId: string, clipId: string) {
     const key = `render:${projectId}:${clipId}`;
-    const project = getProject(projectId);
+    const project = await getProject(projectId);
     const clip = project?.clips.find((item) => item.id === clipId);
     if (!project || !clip || !project.video) return;
     try {
@@ -51,33 +51,43 @@ async function runRender(projectId: string, clipId: string) {
         detail: clip.title,
         updatedAt: now(),
       };
-      saveProject(project);
+      await saveProject(project);
       const filename = `export-${clip.id}.mp4`;
       const outputPath = path.join(projectDir(project.id), filename);
-      const sourcePath = await materializeVideo(project.video);
-      const musicPath = clip.music?.enabled
-        ? project.musicTracks?.find((track) => track.id === clip.music.trackId)?.storedPath
+      const sourcePath = await materializeVideo(project.video, project.id);
+      const selectedMusic = clip.music?.enabled
+        ? project.musicTracks?.find((track) => track.id === clip.music.trackId)
+        : undefined;
+      const musicPath = selectedMusic
+        ? await materializeProjectMedia(project, path.basename(selectedMusic.storedPath))
         : undefined;
       let lastSaved = 0;
+      let pendingProgressSave = Promise.resolve<unknown>(undefined);
       await renderClip(sourcePath, clip, project.transcript, musicPath, outputPath, (progress) => {
         clip.renderProgress = progress;
         project.job.progress = progress;
         if (progress - lastSaved >= 3 || progress === 100) {
           lastSaved = progress;
-          saveProject(project);
+          pendingProgressSave = pendingProgressSave.then(() => saveProject(project));
         }
       });
+      await pendingProgressSave;
+      await persistProjectMedia(project, filename, outputPath, 'video/mp4');
       clip.status = 'complete';
       clip.outputPath = outputPath;
       clip.outputUrl = `/api/media/${project.id}/${filename}?download=1`;
-      const shouldAutoPublish = (provider: PublishingProvider) => {
+      const shouldAutoPublish = async (provider: PublishingProvider) => {
         if (clip.autoPublish) return clip.autoPublish[provider];
-        const account = getIntegrationAccount(provider);
+        const account = await getIntegrationAccount(provider);
         return Boolean(account && account.autoPublish !== false);
       };
+      const [publishYouTube, publishTikTok] = await Promise.all([
+        shouldAutoPublish('youtube'),
+        shouldAutoPublish('tiktok'),
+      ]);
       const publishTargets: PublishingProvider[] = [
-        ...(shouldAutoPublish('youtube') ? ['youtube' as const] : []),
-        ...(shouldAutoPublish('tiktok') ? ['tiktok' as const] : []),
+        ...(publishYouTube ? ['youtube' as const] : []),
+        ...(publishTikTok ? ['tiktok' as const] : []),
       ];
       for (const provider of publishTargets) {
         project.job.stage = `Publishing to ${provider === 'youtube' ? 'YouTube' : 'TikTok'}`;
@@ -86,9 +96,9 @@ async function runRender(projectId: string, clipId: string) {
           ...clip.publications,
           [provider]: { status: 'publishing', updatedAt: now() },
         };
-        saveProject(project);
+        await saveProject(project);
         clip.publications[provider] = await publishClip(project, clip, provider);
-        saveProject(project);
+        await saveProject(project);
       }
       project.status = project.clips.some((item) => item.status === 'rendering') ? 'rendering' : 'complete';
       const publishedCount = publishTargets.filter((provider) => clip.publications?.[provider]?.status === 'published').length;
@@ -104,13 +114,13 @@ async function runRender(projectId: string, clipId: string) {
           : `${clip.title} is ready to download`,
         updatedAt: now(),
       };
-      saveProject(project);
+      await saveProject(project);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown render error';
       clip.status = 'failed';
       project.status = 'ready';
       project.job = { ...project.job, status: 'failed', stage: 'Render failed', detail: message, error: message, updatedAt: now() };
-      saveProject(project);
+      await saveProject(project);
     }
 }
 
@@ -127,6 +137,7 @@ async function processRenderQueue(projectId: string) {
   } finally {
     activeJobs.delete(key);
     renderQueues.delete(projectId);
+    await cleanupProjectWorkspace(projectId);
   }
 }
 

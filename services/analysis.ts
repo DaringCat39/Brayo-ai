@@ -1,22 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { Clip, ClipCategory, Project, TranscriptSegment } from '@/types';
-import { getProject, saveProject } from '@/lib/db';
-import { projectDir } from '@/lib/paths';
+import { getProject, saveProject } from '@/lib/persistence';
+import { cleanupProjectWorkspace, projectDir } from '@/lib/paths';
 import { clamp, now } from '@/lib/utils';
 import { DEFAULT_CLIP_SECONDS, MIN_CLIP_SECONDS, requiredClipDuration } from '@/lib/clip-duration';
 import { createThumbnail, detectSilence, extractAudio, probeVideo } from '@/services/ffmpeg';
 import { transcribeAudio } from '@/services/transcription';
 import { scoreTranscriptWithAi, type AiCandidate } from '@/services/ai/provider';
 import { localTrendHeuristics } from '@/services/trends';
-import { materializeVideo } from '@/services/storage';
+import { materializeVideo, persistProjectMedia } from '@/services/storage';
 
 const categories: ClipCategory[] = ['Story', 'Quote', 'Informative', 'Emotional', 'High energy', 'Funny', 'Controversial'];
 
-function update(project: Project, progress: number, stage: string, detail: string) {
+async function update(project: Project, progress: number, stage: string, detail: string) {
   project.status = 'analysing';
   project.job = { ...project.job, status: 'analysing', progress, stage, detail, updatedAt: now() };
-  saveProject(project);
+  await saveProject(project);
 }
 
 function transcriptAt(segments: TranscriptSegment[], start: number, end: number) {
@@ -140,44 +140,45 @@ function makeClip(candidate: { start: number; end: number; text?: string } & Par
 }
 
 export async function analyseProject(projectId: string) {
-  const project = getProject(projectId);
+  const project = await getProject(projectId);
   if (!project) return;
   try {
     const sourceVideo = project.video;
     if (!sourceVideo) throw new Error('The uploaded source file could not be located.');
     if (sourceVideo.storageProvider === 'vercel-blob') {
-      update(project, 4, 'Preparing source', 'Streaming the completed upload from object storage for FFmpeg');
+      await update(project, 4, 'Preparing source', 'Streaming the completed upload from object storage for FFmpeg');
     }
-    const sourcePath = await materializeVideo(sourceVideo);
-    update(project, 7, 'Probing video', 'Reading codec, frame rate, resolution and duration');
+    const sourcePath = await materializeVideo(sourceVideo, project.id);
+    await update(project, 7, 'Probing video', 'Reading codec, frame rate, resolution and duration');
     project.video = {
       ...await probeVideo(sourcePath, sourceVideo.filename, sourceVideo.size),
       storageProvider: sourceVideo.storageProvider,
       storageUrl: sourceVideo.storageUrl,
       storageKey: sourceVideo.storageKey,
     };
-    update(project, 16, 'Creating preview', 'Extracting a local project thumbnail');
+    await update(project, 16, 'Creating preview', 'Extracting a local project thumbnail');
     const directory = projectDir(project.id);
     const projectThumbnail = path.join(directory, 'thumbnail.jpg');
     await createThumbnail(sourcePath, Math.min(3, project.video.duration * 0.1), projectThumbnail);
+    await persistProjectMedia(project, 'thumbnail.jpg', projectThumbnail, 'image/jpeg');
     project.thumbnailUrl = `/api/media/${project.id}/thumbnail.jpg`;
 
-    update(project, 27, 'Reading audio signals', 'Detecting pauses and clean editorial cut points');
+    await update(project, 27, 'Reading audio signals', 'Detecting pauses and clean editorial cut points');
     const silences = await detectSilence(sourcePath);
     const hasReusableTranscript = project.transcript.length > 0 && !['pending', 'signal-only'].includes(project.transcriptionMode);
     if (hasReusableTranscript) {
-      update(project, 43, 'Reusing synchronized speech', 'The saved word-level transcript is ready, so only the edit plan needs rebuilding');
+      await update(project, 43, 'Reusing synchronized speech', 'The saved word-level transcript is ready, so only the edit plan needs rebuilding');
     } else {
       const audioPath = path.join(directory, 'speech.wav');
       await extractAudio(sourcePath, audioPath);
-      update(project, 43, 'Transcribing every spoken phrase', 'Creating word timestamps with local Whisper; the first run may download the model once');
+      await update(project, 43, 'Transcribing every spoken phrase', 'Creating word timestamps with local Whisper; the first run may download the model once');
       const transcription = await transcribeAudio(audioPath, directory);
       project.transcript = transcription.segments;
       project.transcriptionMode = transcription.mode;
-      saveProject(project);
+      await saveProject(project);
     }
 
-    update(project, 61, 'Finding strongest moments', 'Scoring hooks, pacing, emotion, novelty and clarity');
+    await update(project, 61, 'Finding strongest moments', 'Scoring hooks, pacing, emotion, novelty and clarity');
     const timestamped = project.transcript.map((segment) => `[${segment.start.toFixed(1)}-${segment.end.toFixed(1)}] ${segment.text}`).join('\n');
     let aiCandidates: AiCandidate[] | null = null;
     try {
@@ -202,14 +203,16 @@ export async function analyseProject(projectId: string) {
     });
     project.clips = fittedCandidates.slice(0, 15).map((candidate, index) => makeClip(candidate, index, silences, project.transcript, project.defaultCaptionPreset || 'bold'));
 
-    update(project, 76, 'Generating clip previews', 'Creating thumbnails for every ranked moment');
+    await update(project, 76, 'Generating clip previews', 'Creating thumbnails for every ranked moment');
     for (let index = 0; index < project.clips.length; index += 1) {
       const clip = project.clips[index];
       const filename = `clip-${clip.id}.jpg`;
-      await createThumbnail(sourcePath, clip.start + Math.min(1, clip.duration / 2), path.join(directory, filename));
+      const thumbnailPath = path.join(directory, filename);
+      await createThumbnail(sourcePath, clip.start + Math.min(1, clip.duration / 2), thumbnailPath);
+      await persistProjectMedia(project, filename, thumbnailPath, 'image/jpeg');
       clip.thumbnailUrl = `/api/media/${project.id}/${filename}`;
       project.job.progress = 76 + Math.round(((index + 1) / project.clips.length) * 20);
-      saveProject(project);
+      await saveProject(project);
     }
     project.clips.sort((a, b) => b.scores.viral - a.scores.viral);
     project.status = 'ready';
@@ -221,12 +224,14 @@ export async function analyseProject(projectId: string) {
       detail: `${project.clips.length} candidate clips ranked by estimated potential`,
       updatedAt: now(),
     };
-    saveProject(project);
+    await saveProject(project);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown analysis error';
     project.status = 'failed';
     project.error = message;
     project.job = { ...project.job, status: 'failed', stage: 'Analysis failed', detail: message, error: message, updatedAt: now() };
-    saveProject(project);
+    await saveProject(project);
+  } finally {
+    await cleanupProjectWorkspace(project.id);
   }
 }

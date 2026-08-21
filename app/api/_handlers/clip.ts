@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getProject, saveProject } from '@/lib/db';
+import { getProject, saveProject } from '@/lib/persistence';
 import type { Clip } from '@/types';
 import { clamp } from '@/lib/utils';
 import { requiredClipDuration } from '@/lib/clip-duration';
@@ -29,7 +29,7 @@ const allowedKeys: Array<keyof Clip> = [
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string; clipId: string }> }) {
   const { id, clipId } = await context.params;
-  const project = getProject(id);
+  const project = await getProject(id);
   const clip = project?.clips.find((item) => item.id === clipId);
   if (!project || !clip || !project.video) return NextResponse.json({ error: 'Clip not found.' }, { status: 404 });
   const body = (await request.json()) as Partial<Clip>;
@@ -44,6 +44,6 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   clip.renderProgress = 0;
   clip.outputUrl = undefined;
   clip.outputPath = undefined;
-  saveProject(project);
+  await saveProject(project);
   return NextResponse.json({ project, clip });
 }

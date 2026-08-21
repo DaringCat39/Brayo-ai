@@ -6,9 +6,9 @@ import path from 'node:path';
 import { head } from '@vercel/blob';
 import { NextRequest, NextResponse } from 'next/server';
 import type { CaptionSettings, CompletedVideoUpload, Project } from '@/types';
-import { listProjects, saveProject } from '@/lib/db';
+import { listProjects, saveProject } from '@/lib/persistence';
 import { CLIP_DURATION_OPTIONS, DEFAULT_CLIP_SECONDS } from '@/lib/clip-duration';
-import { projectDir } from '@/lib/paths';
+import { IS_VERCEL, projectDir, projectWorkspacePath } from '@/lib/paths';
 import { BLOB_VIDEO_PREFIX, isAllowedVideoExtension } from '@/lib/upload-config';
 import { now, safeFilename, titleFromFilename } from '@/lib/utils';
 import { enqueueAnalysis } from '@/services/queue';
@@ -33,7 +33,7 @@ function captionPreset(value: unknown): CaptionSettings['preset'] {
   return captionPresets.includes(value as CaptionSettings['preset']) ? value as CaptionSettings['preset'] : 'bold';
 }
 
-function makeProject(options: {
+async function makeProject(options: {
   id?: string;
   filename: string;
   size: number;
@@ -47,7 +47,9 @@ function makeProject(options: {
   const extension = path.extname(options.filename).toLowerCase();
   const id = options.id || randomUUID();
   const storedName = `source${extension}`;
-  const outputPath = path.join(projectDir(id), storedName);
+  // Merely registering a completed Blob upload must not create a filesystem
+  // directory. The path is only a future FFmpeg workspace location.
+  const outputPath = path.join(projectWorkspacePath(id), storedName);
   const createdAt = now();
   const project: Project = {
     id,
@@ -87,7 +89,7 @@ function makeProject(options: {
       updatedAt: createdAt,
     },
   };
-  saveProject(project);
+  await saveProject(project);
   enqueueAnalysis(id);
   return project;
 }
@@ -134,7 +136,7 @@ async function registerDirectUpload(request: NextRequest) {
     // Only compact, verified metadata reaches this Function. The video bytes
     // have already travelled directly from the browser to object storage.
     const id = randomUUID();
-    const project = makeProject({
+    const project = await makeProject({
       id,
       filename: body.filename,
       size: stored.size,
@@ -155,12 +157,19 @@ async function registerDirectUpload(request: NextRequest) {
 }
 
 export async function GET() {
-  return NextResponse.json({ projects: listProjects() });
+  return NextResponse.json({ projects: await listProjects() });
 }
 
 export async function POST(request: NextRequest) {
   if (request.headers.get('content-type')?.includes('application/json')) {
     return registerDirectUpload(request);
+  }
+
+  if (IS_VERCEL) {
+    return NextResponse.json(
+      { error: 'Vercel video uploads must use the direct Blob upload flow.' },
+      { status: 409 },
+    );
   }
 
   if (!request.body) return NextResponse.json({ error: 'No video data received.' }, { status: 400 });
@@ -187,7 +196,7 @@ export async function POST(request: NextRequest) {
   const size = Number(request.headers.get('content-length') || 0);
   // Local development keeps the original streamed upload path. It writes the
   // request incrementally and never buffers the complete video in memory.
-  const project = makeProject({
+  const project = await makeProject({
     id,
     filename,
     size,
