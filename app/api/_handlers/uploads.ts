@@ -76,42 +76,57 @@ function withinTokenRate(request: NextRequest) {
   return true;
 }
 
-function jsonError(error: string, code: string, status: number, retryable = false) {
-  return NextResponse.json({ error, code, retryable }, { status });
+function jsonError(
+  error: string,
+  code: string,
+  status: number,
+  retryable = false,
+  missingVariables: readonly string[] = [],
+) {
+  return NextResponse.json({
+    error,
+    code,
+    retryable,
+    ...(missingVariables.length ? { missingVariables } : {}),
+  }, { status });
 }
 
 export async function GET() {
   const configured = b2Configured();
-  if (configured) {
-    try {
-      validateB2RuntimeConfiguration();
-    } catch (error) {
-      const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
-      return jsonError(detail.error, detail.code, detail.status, detail.retryable);
-    }
+  if (!configured && !process.env.VERCEL) {
+    const capabilities: UploadCapabilities = {
+      provider: 'local',
+      direct: false,
+      multipart: false,
+      localFallback: true,
+    };
+    return NextResponse.json(capabilities);
   }
-  const capabilities: UploadCapabilities = configured
-    ? { provider: 'backblaze-b2', direct: true, multipart: true, localFallback: false }
-    : { provider: 'local', direct: false, multipart: false, localFallback: !process.env.VERCEL };
+  try {
+    validateB2RuntimeConfiguration();
+  } catch (error) {
+    const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable, detail.missingVariables);
+  }
+  const capabilities: UploadCapabilities = {
+    provider: 'backblaze-b2',
+    direct: true,
+    multipart: true,
+    localFallback: false,
+  };
   return NextResponse.json(capabilities);
 }
 
 export async function POST(request: NextRequest) {
-  if (b2Configured()) {
-    try {
-      validateB2RuntimeConfiguration();
-    } catch (error) {
-      const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
-      return jsonError(detail.error, detail.code, detail.status, detail.retryable);
-    }
+  try {
+    validateB2RuntimeConfiguration();
+  } catch (error) {
+    const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable, detail.missingVariables);
   }
   if (!isSameOrigin(request)) {
     return jsonError('Upload authorization must come from this app.', 'UPLOAD_ORIGIN_REJECTED', 403);
   }
-  if (!b2Configured()) {
-    return jsonError('Private object storage is not configured.', 'STORAGE_NOT_CONFIGURED', 503);
-  }
-
   try {
     const body = await request.json() as Record<string, unknown>;
     const action = body.action;
@@ -196,6 +211,6 @@ export async function POST(request: NextRequest) {
       return jsonError(error.message, 'INVALID_UPLOAD_SESSION', 400);
     }
     const detail = storageErrorDetails(error, 'Object storage could not complete the request.');
-    return jsonError(detail.error, detail.code, detail.status, detail.retryable);
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable, detail.missingVariables);
   }
 }

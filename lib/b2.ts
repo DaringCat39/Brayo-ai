@@ -29,6 +29,8 @@ const REQUIRED_B2_ENV = [
   'B2_APPLICATION_KEY',
 ] as const;
 
+type RequiredB2EnvironmentName = (typeof REQUIRED_B2_ENV)[number];
+
 const PRESIGNED_UPLOAD_PART_TTL_SECONDS = 15 * 60;
 
 export const B2_PROJECT_PREFIX = 'brayo/projects/';
@@ -38,7 +40,10 @@ export const B2_INTEGRATION_PREFIX = 'brayo/metadata/integrations/';
 export class StorageConfigurationError extends Error {
   readonly code = 'STORAGE_NOT_CONFIGURED';
 
-  constructor(message = 'Production object storage is not configured.') {
+  constructor(
+    message = 'Production object storage is not configured.',
+    readonly missingVariables: readonly string[] = [],
+  ) {
     super(message);
     this.name = 'StorageConfigurationError';
   }
@@ -81,12 +86,28 @@ declare global {
   var brayoB2ClientFingerprint: string | undefined;
 }
 
+function trimmedB2Environment(): Record<RequiredB2EnvironmentName, string> {
+  return Object.fromEntries(
+    REQUIRED_B2_ENV.map((name) => [name, process.env[name]?.trim() || '']),
+  ) as Record<RequiredB2EnvironmentName, string>;
+}
+
+export function missingB2EnvironmentVariables() {
+  const environment = trimmedB2Environment();
+  return REQUIRED_B2_ENV.filter((name) => !environment[name]);
+}
+
 function readB2Config(): B2Config {
-  const missing = REQUIRED_B2_ENV.filter((name) => !process.env[name]?.trim());
+  const environment = trimmedB2Environment();
+  const missing = REQUIRED_B2_ENV.filter((name) => !environment[name]);
   if (missing.length) {
-    throw new StorageConfigurationError(`Missing Backblaze B2 configuration: ${missing.join(', ')}.`);
+    logB2Diagnostic('configuration.missing', { missingVariables: missing });
+    throw new StorageConfigurationError(
+      `Missing Backblaze B2 configuration: ${missing.join(', ')}.`,
+      missing,
+    );
   }
-  const rawEndpoint = process.env.B2_ENDPOINT!.trim().replace(/\/+$/, '');
+  const rawEndpoint = environment.B2_ENDPOINT.replace(/\/+$/, '');
   const endpoint = /^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
   let parsedEndpoint: URL;
   try {
@@ -97,7 +118,7 @@ function readB2Config(): B2Config {
   if (process.env.VERCEL && parsedEndpoint.protocol !== 'https:') {
     throw new StorageConfigurationError('B2_ENDPOINT must use HTTPS in production.');
   }
-  const region = process.env.B2_REGION!.trim();
+  const region = environment.B2_REGION;
   const expectedHostname = `s3.${region}.backblazeb2.com`;
   if (
     parsedEndpoint.hostname.toLowerCase() !== expectedHostname.toLowerCase()
@@ -110,16 +131,22 @@ function readB2Config(): B2Config {
   return {
     endpoint,
     region,
-    bucket: process.env.B2_BUCKET_NAME!.trim(),
-    accessKeyId: process.env.B2_APPLICATION_KEY_ID!.trim(),
-    secretAccessKey: process.env.B2_APPLICATION_KEY!.trim(),
+    bucket: environment.B2_BUCKET_NAME,
+    accessKeyId: environment.B2_APPLICATION_KEY_ID,
+    secretAccessKey: environment.B2_APPLICATION_KEY,
   };
 }
 
 export function configuredAppOrigin(fallback?: string) {
   const configured = process.env.APP_URL?.trim();
   const value = configured || fallback?.trim();
-  if (!value) throw new StorageConfigurationError('Missing APP_URL. Set it to the exact Brayo.ai origin.');
+  if (!value) {
+    logB2Diagnostic('configuration.missing', { missingVariables: ['APP_URL'] });
+    throw new StorageConfigurationError(
+      'Missing APP_URL. Set it to the exact Brayo.ai origin.',
+      ['APP_URL'],
+    );
+  }
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -146,7 +173,7 @@ export function validateB2RuntimeConfiguration() {
 
 export function logB2Diagnostic(
   event: string,
-  context: Record<string, string | number | boolean | number[] | undefined>,
+  context: Record<string, string | number | boolean | readonly string[] | number[] | undefined>,
   error?: unknown,
 ) {
   const candidate = error as B2ErrorMetadata | undefined;
@@ -165,7 +192,7 @@ export function logB2Diagnostic(
 }
 
 export function b2Configured() {
-  return REQUIRED_B2_ENV.every((name) => Boolean(process.env[name]?.trim()));
+  return missingB2EnvironmentVariables().length === 0;
 }
 
 export function b2BucketName() {
@@ -633,7 +660,13 @@ export function storageErrorDetails(error: unknown, fallback: string) {
     $metadata?: { httpStatusCode?: number };
   };
   if (error instanceof StorageConfigurationError) {
-    return { error: error.message, code: error.code, retryable: false, status: 503 };
+    return {
+      error: error.message,
+      code: error.code,
+      retryable: false,
+      status: 503,
+      missingVariables: [...error.missingVariables],
+    };
   }
   const status = candidate?.$metadata?.httpStatusCode;
   const providerCode = candidate?.Code || candidate?.code || candidate?.name || 'STORAGE_ERROR';
@@ -643,6 +676,7 @@ export function storageErrorDetails(error: unknown, fallback: string) {
       code: providerCode === 'NoSuchBucket' ? 'STORAGE_BUCKET_NOT_FOUND' : 'STORAGE_RESOURCE_NOT_FOUND',
       retryable: false,
       status: 503,
+      missingVariables: [],
     };
   }
   if (status === 401 || status === 403 || ['AccessDenied', 'InvalidAccessKeyId', 'SignatureDoesNotMatch'].includes(providerCode)) {
@@ -651,6 +685,7 @@ export function storageErrorDetails(error: unknown, fallback: string) {
       code: 'STORAGE_ACCESS_DENIED',
       retryable: false,
       status: 503,
+      missingVariables: [],
     };
   }
   if (['AuthorizationHeaderMalformed', 'PermanentRedirect', 'IncorrectEndpoint', 'InvalidRegion'].includes(providerCode)) {
@@ -659,6 +694,7 @@ export function storageErrorDetails(error: unknown, fallback: string) {
       code: 'STORAGE_ENDPOINT_MISMATCH',
       retryable: false,
       status: 503,
+      missingVariables: [],
     };
   }
   const safeMessage = candidate?.message && !/credential|secret|application key/i.test(candidate.message)
@@ -672,5 +708,6 @@ export function storageErrorDetails(error: unknown, fallback: string) {
     // particular, never let an upstream 404 make a reached API handler look
     // missing to Vercel or the browser.
     status: status && status >= 500 ? 502 : 503,
+    missingVariables: [],
   };
 }

@@ -9,11 +9,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { CaptionSettings, CompletedVideoUpload, Project, UploadStorageProvider } from '@/types';
 import {
   b2BucketName,
-  b2Configured,
   headB2Object,
   logB2Diagnostic,
   projectSourceKey,
   storageErrorDetails,
+  validateB2RuntimeConfiguration,
   verifyUploadSession,
 } from '@/lib/b2';
 import { activateCurrentProject, getProject, listProjects } from '@/lib/persistence';
@@ -43,8 +43,19 @@ function captionPreset(value: unknown): CaptionSettings['preset'] {
   return captionPresets.includes(value as CaptionSettings['preset']) ? value as CaptionSettings['preset'] : 'bold';
 }
 
-function jsonError(error: string, code: string, status: number, retryable = false) {
-  return NextResponse.json({ error, code, retryable }, { status });
+function jsonError(
+  error: string,
+  code: string,
+  status: number,
+  retryable = false,
+  missingVariables: readonly string[] = [],
+) {
+  return NextResponse.json({
+    error,
+    code,
+    retryable,
+    ...(missingVariables.length ? { missingVariables } : {}),
+  }, { status });
 }
 
 async function makeProject(options: {
@@ -110,8 +121,11 @@ async function makeProject(options: {
 }
 
 async function registerDirectUpload(request: NextRequest) {
-  if (!b2Configured()) {
-    return jsonError('Private object storage is not configured.', 'STORAGE_NOT_CONFIGURED', 503);
+  try {
+    validateB2RuntimeConfiguration();
+  } catch (error) {
+    const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable, detail.missingVariables);
   }
 
   let body: DirectProjectRequest;
@@ -207,7 +221,7 @@ async function registerDirectUpload(request: NextRequest) {
       return jsonError(error.message, 'INVALID_UPLOAD_SESSION', 400);
     }
     const detail = storageErrorDetails(error, 'The completed upload could not be verified in object storage.');
-    return jsonError(detail.error, detail.code, detail.status, detail.retryable);
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable, detail.missingVariables);
   }
 }
 
@@ -221,7 +235,7 @@ export async function GET() {
       status: detail.status,
       error: detail.error,
     });
-    return jsonError(detail.error, detail.code, detail.status, detail.retryable);
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable, detail.missingVariables);
   }
 }
 

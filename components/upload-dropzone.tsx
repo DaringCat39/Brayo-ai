@@ -508,7 +508,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
     try {
       const storage = await getCapabilities();
       if (!storage.direct && !storage.localFallback) {
-        throw new Error('Private object storage is not configured for this deployment.');
+        throw new Error('Direct Backblaze B2 upload is unavailable for this deployment.');
       }
       setUploadStage(storage.direct ? 'Uploading directly to storage' : 'Uploading to local server');
       const project = storage.direct ? await registerDirectUpload(file) : await registerLocalUpload(file);
