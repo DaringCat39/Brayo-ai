@@ -179,6 +179,49 @@ export interface JobState {
   error?: string;
 }
 
+export type ProcessingTimingStage =
+  | 'blobMaterialization'
+  | 'audioExtraction'
+  | 'transcription'
+  | 'sceneAnalysis'
+  | 'viralAnalysis'
+  | 'clipSelection'
+  | 'rendering';
+
+export interface ProcessingTiming {
+  durationMs: number;
+  updatedAt: string;
+  detail?: string;
+}
+
+export interface AudioChunkReference {
+  index: number;
+  filename: string;
+  start: number;
+  end: number;
+  overlap: number;
+}
+
+export type AnalysisCheckpoint =
+  | 'video-prepared'
+  | 'audio-prepared'
+  | 'transcript-complete'
+  | 'scenes-complete'
+  | 'clips-selected'
+  | 'previews-complete';
+
+export interface ProjectAnalysisState {
+  version: 2;
+  workflowRunId?: string;
+  sourceFingerprint: string;
+  completedStages: AnalysisCheckpoint[];
+  audioChunks?: AudioChunkReference[];
+  silences?: Array<{ start: number; end: number }>;
+  sceneTimestamps?: number[];
+  timings?: Partial<Record<ProcessingTimingStage, ProcessingTiming>>;
+  fullVideoFfmpegPasses: number;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -194,6 +237,7 @@ export interface Project {
   transcriptionMode: 'pending' | 'local-whisper' | 'built-in-whisper' | 'openai' | 'signal-only';
   preferredDuration: 75 | 90 | 120 | 180;
   defaultCaptionPreset?: CaptionSettings['preset'];
+  analysis?: ProjectAnalysisState;
   job: JobState;
   thumbnailUrl?: string;
   error?: string;

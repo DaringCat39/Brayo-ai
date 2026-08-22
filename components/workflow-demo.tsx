@@ -12,7 +12,7 @@ export function WorkflowDemo() {
       <div className="absolute -right-20 -top-24 h-52 w-52 rounded-full bg-violet/15 blur-3xl" />
       <div className="relative flex items-center justify-between">
         <div><p className="eyebrow">Three-step workflow</p><p className="mt-1.5 text-sm text-white/55">Upload, choose a look, then let the clip machine run.</p></div>
-        <span className="hidden items-center gap-1.5 rounded-full border border-lime/15 bg-lime/[0.06] px-3 py-1.5 text-[10px] font-semibold text-lime sm:flex"><Check className="h-3 w-3" /> LOCAL PIPELINE</span>
+        <span className="hidden items-center gap-1.5 rounded-full border border-lime/15 bg-lime/[0.06] px-3 py-1.5 text-[10px] font-semibold text-lime sm:flex"><Check className="h-3 w-3" /> DURABLE PIPELINE</span>
       </div>
       <div className="relative mt-7 grid gap-2 md:grid-cols-3">
         {steps.map(({ number, label, detail, icon: Icon, accent }, index) => (

@@ -17,7 +17,8 @@
     "next": "^16.3.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "wavefile": "^11.0.0"
+    "wavefile": "^11.0.0",
+    "workflow": "^4.8.4"
   },
   "devDependencies": {
     "@types/ffprobe-static": "^2.0.3",

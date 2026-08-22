@@ -19,6 +19,6 @@ export async function POST(_: NextRequest, context: { params: Promise<{ id: stri
     updatedAt: now(),
   };
   await saveProject(project);
-  enqueueAnalysis(id);
+  await enqueueAnalysis(id);
   return NextResponse.json({ project }, { status: 202 });
 }

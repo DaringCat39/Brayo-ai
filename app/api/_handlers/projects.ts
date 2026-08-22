@@ -90,7 +90,7 @@ async function makeProject(options: {
     },
   };
   await saveProject(project);
-  enqueueAnalysis(id);
+  await enqueueAnalysis(id);
   return project;
 }
 

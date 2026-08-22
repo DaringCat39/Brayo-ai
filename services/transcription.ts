@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { openAsBlob } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { WaveFile } from 'wavefile';
@@ -160,9 +161,10 @@ async function openAiTranscription(audioPath: string): Promise<TranscriptSegment
   const key = process.env.OPENAI_API_KEY;
   if (!key) return null;
   const baseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-  const audio = await readFile(audioPath);
   const form = new FormData();
-  form.append('file', new Blob([audio], { type: 'audio/wav' }), path.basename(audioPath));
+  // Only a bounded audio chunk is sent, and it is streamed from disk instead
+  // of buffering a complete long-video soundtrack in memory.
+  form.append('file', await openAsBlob(audioPath, { type: 'audio/wav' }), path.basename(audioPath));
   form.append('model', 'whisper-1');
   form.append('response_format', 'verbose_json');
   form.append('timestamp_granularities[]', 'word');
@@ -184,6 +186,15 @@ async function openAiTranscription(audioPath: string): Promise<TranscriptSegment
 }
 
 export async function transcribeAudio(audioPath: string, outputDir: string) {
+  const preferConfiguredRemote = process.env.BRAYO_TRANSCRIPTION_PROVIDER === 'openai';
+  if (preferConfiguredRemote) {
+    try {
+      const remote = await openAiTranscription(audioPath);
+      if (remote?.length) return { segments: remote, mode: 'openai' as const };
+    } catch (error) {
+      console.warn('Configured remote chunk transcription failed, trying local Whisper.', error);
+    }
+  }
   try {
     const local = await commandLineWhisper(audioPath, outputDir);
     if (local?.length) return { segments: local, mode: 'local-whisper' as const };
@@ -197,11 +208,13 @@ export async function transcribeAudio(audioPath: string, outputDir: string) {
     global.viralcutLocalTranscriber = undefined;
     console.warn('Built-in local Whisper failed, trying the configured API.', error);
   }
-  try {
-    const remote = await openAiTranscription(audioPath);
-    if (remote?.length) return { segments: remote, mode: 'openai' as const };
-  } catch (error) {
-    console.warn('Remote transcription failed; signal-only analysis will be used.', error);
+  if (!preferConfiguredRemote) {
+    try {
+      const remote = await openAiTranscription(audioPath);
+      if (remote?.length) return { segments: remote, mode: 'openai' as const };
+    } catch (error) {
+      console.warn('Remote transcription failed; signal-only analysis will be used.', error);
+    }
   }
   return { segments: [], mode: 'signal-only' as const };
 }

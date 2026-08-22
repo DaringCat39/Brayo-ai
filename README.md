@@ -57,6 +57,21 @@ OPENAI_MODEL=gpt-4.1-mini
 
 The OpenAI-compatible provider remains optional. Caption cue text can be corrected in the editor without changing its original speech timing.
 
+For the fastest Vercel transcription path, explicitly opt in to sending bounded five-minute audio chunks to the configured provider:
+
+```bash
+BRAYO_TRANSCRIPTION_PROVIDER=openai
+BRAYO_TRANSCRIPTION_CONCURRENCY=4
+```
+
+Without that opt-in, local Whisper remains first and long videos are still split across concurrent, retryable workers.
+
+## Vercel production processing
+
+Production uses the Node.js runtime, direct private Blob uploads, and Vercel Workflow. The upload request returns a project ID immediately; durable steps then prepare the source, transcribe overlapping chunks, analyse scenes, select clips, generate previews, and render selected clips. Project metadata, audio chunks, transcript checkpoints, scene results, thumbnails, and renders are persisted in private Blob storage, while FFmpeg scratch files use `/tmp` only.
+
+Enable Fluid Compute for the Vercel project. Hobby steps are designed to stay below the 300-second maximum: a 40-minute source is planned as nine overlapping audio chunks of at most five minutes each, processed with bounded concurrency. The build creates the consolidated public API Function plus Workflow's three private handlers, for four dynamic Functions in total.
+
 ## Privacy
 
 Footage remains on this device by default. If an external AI provider is configured, extracted speech audio and timestamped transcript content may be sent to that configured endpoint for transcription or semantic analysis.

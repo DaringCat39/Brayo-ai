@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
-import { access, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import type { Clip, TranscriptSegment, VideoMetadata } from '@/types';
 import { clamp } from '@/lib/utils';
+import { planAudioChunks } from '@/lib/audio-chunks';
 
 const packagedFfmpegPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
 const packagedFfprobePath = path.join(
@@ -148,6 +149,106 @@ export async function extractAudio(inputPath: string, outputPath: string) {
   ]);
 }
 
+function parseSilences(stderr: string) {
+  const starts = [...stderr.matchAll(/silence_start: ([\d.]+)/g)].map((match) => Number(match[1]));
+  const ends = [...stderr.matchAll(/silence_end: ([\d.]+)/g)].map((match) => Number(match[1]));
+  return starts.map((start, index) => ({ start, end: ends[index] ?? start + 0.65 }));
+}
+
+export async function extractAudioWithSilences(inputPath: string, outputPath: string) {
+  const { stderr } = await runProcess(ffmpegPath, [
+    '-y',
+    '-i',
+    inputPath,
+    '-vn',
+    '-af',
+    'silencedetect=noise=-32dB:d=0.65',
+    '-ac',
+    '1',
+    '-ar',
+    '16000',
+    '-c:a',
+    'pcm_s16le',
+    outputPath,
+  ]);
+  return parseSilences(stderr);
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function runWorker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker()));
+  return results;
+}
+
+export async function splitAudioForTranscription(
+  inputPath: string,
+  outputDir: string,
+  duration: number,
+  chunkSeconds = 300,
+  overlap = 5,
+) {
+  await mkdir(outputDir, { recursive: true });
+  const plan = planAudioChunks(duration, chunkSeconds, overlap);
+  return mapWithConcurrency(plan, 4, async (chunk) => {
+    const filename = `analysis-audio-${String(chunk.index).padStart(3, '0')}.wav`;
+    const outputPath = path.join(outputDir, filename);
+    await runProcess(ffmpegPath, [
+      '-y',
+      '-ss',
+      String(chunk.start),
+      '-t',
+      String(chunk.end - chunk.start),
+      '-i',
+      inputPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-c:a',
+      'pcm_s16le',
+      outputPath,
+    ]);
+    return { ...chunk, filename, outputPath };
+  });
+}
+
+export async function detectSceneTimestamps(inputPath: string, duration: number) {
+  try {
+    const { stdout } = await runProcess(ffprobePath, [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-skip_frame',
+      'nokey',
+      '-show_entries',
+      'frame=best_effort_timestamp_time',
+      '-of',
+      'csv=p=0',
+      inputPath,
+    ]);
+    const parsed = stdout
+      .split(/\r?\n/)
+      .map((line) => Number(line.trim().split(',')[0]))
+      .filter((timestamp) => Number.isFinite(timestamp) && timestamp >= 0 && timestamp <= duration)
+      .sort((a, b) => a - b);
+    const deduplicated = parsed.filter((timestamp, index) => index === 0 || timestamp - parsed[index - 1] >= 0.5);
+    return Array.from(new Set([0, ...deduplicated, Number(duration.toFixed(3))]));
+  } catch (error) {
+    console.warn('Scene/keyframe analysis failed; speech and silence signals will still be used.', error);
+    return [0, Number(duration.toFixed(3))];
+  }
+}
+
 export async function detectSilence(inputPath: string) {
   try {
     const { stderr } = await runProcess(ffmpegPath, [
@@ -159,9 +260,7 @@ export async function detectSilence(inputPath: string) {
       'null',
       '-',
     ]);
-    const starts = [...stderr.matchAll(/silence_start: ([\d.]+)/g)].map((match) => Number(match[1]));
-    const ends = [...stderr.matchAll(/silence_end: ([\d.]+)/g)].map((match) => Number(match[1]));
-    return starts.map((start, index) => ({ start, end: ends[index] ?? start + 0.65 }));
+    return parseSilences(stderr);
   } catch {
     return [];
   }

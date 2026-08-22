@@ -62,8 +62,16 @@ function ProcessingView({ project, reload }: { project: Project; reload: () => v
     await fetch(`/api/projects/${project.id}/analyse`, { method: 'POST' });
     reload();
   }
-  const stages = ['Upload secured', 'Video signals', 'Speech & context', 'Candidate scoring', 'Clip previews'];
-  const activeStage = Math.min(stages.length - 1, Math.floor(project.job.progress / 20));
+  const stages = [
+    { label: 'Upload complete', startsAt: 0 },
+    { label: 'Preparing video', startsAt: 5 },
+    { label: 'Transcribing', startsAt: 27 },
+    { label: 'Analysing scenes', startsAt: 62 },
+    { label: 'Selecting clips', startsAt: 68 },
+    { label: 'Clip previews', startsAt: 82 },
+    { label: 'Complete', startsAt: 100 },
+  ];
+  const activeStage = Math.max(0, stages.findLastIndex((stage) => project.job.progress >= stage.startsAt));
   return (
     <div className="mx-auto flex min-h-[calc(100vh-1px)] max-w-5xl items-center px-4 py-10 sm:px-8">
       <div className="w-full">
@@ -71,7 +79,7 @@ function ProcessingView({ project, reload }: { project: Project; reload: () => v
           <span className={`mx-auto grid h-16 w-16 place-items-center rounded-2xl border ${failed ? 'border-red-400/20 bg-red-400/[0.06] text-red-300' : 'border-violet/20 bg-violet/[0.08] text-[#b8afff]'}`}>
             {failed ? <CircleAlert className="h-7 w-7" /> : <WandSparkles className="h-7 w-7" />}
           </span>
-          <p className="eyebrow mt-6">{failed ? 'Processing stopped' : 'Analysing locally'}</p>
+          <p className="eyebrow mt-6">{failed ? 'Processing stopped' : 'Durable processing'}</p>
           <h1 className="mt-2 text-3xl font-semibold tracking-[-0.045em] sm:text-4xl">{failed ? 'This video needs attention.' : project.job.stage}</h1>
           <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-white/40">{project.job.detail}</p>
         </div>
@@ -88,16 +96,16 @@ function ProcessingView({ project, reload }: { project: Project; reload: () => v
               </div>
             </div>
           </div>
-          <div className="mt-7 grid gap-2 sm:grid-cols-5">
+          <div className="mt-7 grid gap-2 sm:grid-cols-7">
             {stages.map((stage, index) => (
-              <div key={stage} className={`rounded-xl border px-3 py-3 text-center text-[10px] font-medium ${index < activeStage ? 'border-lime/10 bg-lime/[0.04] text-lime/70' : index === activeStage && !failed ? 'border-violet/20 bg-violet/[0.07] text-[#b8afff]' : 'border-white/[0.06] text-white/25'}`}>
-                <span className="mb-2 block text-xs">{index < activeStage ? <Check className="mx-auto h-3.5 w-3.5" /> : index + 1}</span>{stage}
+              <div key={stage.label} className={`rounded-xl border px-3 py-3 text-center text-[10px] font-medium ${index < activeStage ? 'border-lime/10 bg-lime/[0.04] text-lime/70' : index === activeStage && !failed ? 'border-violet/20 bg-violet/[0.07] text-[#b8afff]' : 'border-white/[0.06] text-white/25'}`}>
+                <span className="mb-2 block text-xs">{index < activeStage ? <Check className="mx-auto h-3.5 w-3.5" /> : index + 1}</span>{stage.label}
               </div>
             ))}
           </div>
           {failed && <button onClick={retry} className="button-primary mx-auto mt-6"><RotateCcw className="h-4 w-4" /> Retry analysis</button>}
         </div>
-        {!failed && <p className="mt-5 text-center text-[11px] text-white/25">You can leave this page. The local background job will keep running while the dev server is open.</p>}
+        {!failed && <p className="mt-5 text-center text-[11px] text-white/25">You can leave this page. The durable job keeps its completed stages and resumes safely after retries.</p>}
       </div>
     </div>
   );

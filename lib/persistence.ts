@@ -1,6 +1,8 @@
 import { BlobNotFoundError, del, get, list, put } from '@vercel/blob';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import * as localDb from '@/lib/db';
-import { IS_VERCEL } from '@/lib/paths';
+import { IS_VERCEL, projectWorkspacePath } from '@/lib/paths';
 import type { Project, PublishingProvider } from '@/types';
 
 export type { StoredIntegrationAccount } from '@/lib/db';
@@ -8,6 +10,15 @@ import type { StoredIntegrationAccount } from '@/lib/db';
 
 const PROJECT_PREFIX = 'brayo/metadata/projects/';
 const INTEGRATION_PREFIX = 'brayo/metadata/integrations/';
+const INTERMEDIATE_PREFIX = 'brayo/intermediate/projects/';
+
+function intermediatePath(projectId: string, key: string) {
+  const parts = key.split('/').filter(Boolean);
+  if (!parts.length || parts.some((part) => part === '.' || part === '..' || part !== path.basename(part))) {
+    throw new Error('Invalid intermediate result key.');
+  }
+  return path.join(projectWorkspacePath(projectId), 'intermediate', ...parts);
+}
 
 function requireBlobPersistence() {
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
@@ -36,6 +47,26 @@ async function writeBlobJson(pathname: string, value: unknown) {
     contentType: 'application/json',
     cacheControlMaxAge: 60,
   });
+}
+
+export async function readProjectIntermediate<T>(projectId: string, key: string): Promise<T | null> {
+  if (IS_VERCEL) return readBlobJson<T>(`${INTERMEDIATE_PREFIX}${projectId}/${key}`);
+  try {
+    return JSON.parse(await readFile(intermediatePath(projectId, key), 'utf8')) as T;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export async function writeProjectIntermediate(projectId: string, key: string, value: unknown) {
+  if (IS_VERCEL) {
+    await writeBlobJson(`${INTERMEDIATE_PREFIX}${projectId}/${key}`, value);
+    return;
+  }
+  const filename = intermediatePath(projectId, key);
+  await mkdir(path.dirname(filename), { recursive: true });
+  await writeFile(filename, JSON.stringify(value), 'utf8');
 }
 
 export async function getIntegrationAccount(provider: PublishingProvider) {

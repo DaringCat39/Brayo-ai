@@ -13,6 +13,6 @@ export async function POST(_: NextRequest, context: { params: Promise<{ id: stri
   if ((project.video?.duration || 0) >= MIN_CLIP_SECONDS && effectiveClipDuration(clip) < MIN_CLIP_SECONDS) {
     return NextResponse.json({ error: 'Keep at least 61 seconds after cuts before exporting.' }, { status: 400 });
   }
-  enqueueRender(id, clipId);
+  await enqueueRender(id, clipId);
   return NextResponse.json({ queued: true }, { status: 202 });
 }

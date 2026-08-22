@@ -53,6 +53,23 @@ export async function materializeVideo(video: VideoMetadata, projectId: string) 
   return downloadPrivateBlob(video.storageKey || video.storageUrl, targetPath, video.size || undefined);
 }
 
+export async function processingInputForVideo(video: VideoMetadata, projectId: string) {
+  if (IS_VERCEL && video.storageProvider === 'vercel-blob' && (video.storageKey || video.storageUrl)) {
+    // FFmpeg and ffprobe can seek over HTTPS. A short-lived signed URL avoids
+    // copying a multi-gigabyte source into /tmp before the real work starts.
+    return {
+      input: await signedBlobReadUrl(video.storageKey || video.storageUrl!),
+      materialized: false,
+      mode: 'private-blob-stream' as const,
+    };
+  }
+  return {
+    input: await materializeVideo(video, projectId),
+    materialized: true,
+    mode: 'temporary-file' as const,
+  };
+}
+
 export async function persistProjectMedia(
   project: Project,
   filename: string,
