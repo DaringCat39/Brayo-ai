@@ -4,9 +4,19 @@ import { access, mkdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { get, issueSignedToken, presignUrl, put } from '@vercel/blob';
+import { Upload } from '@aws-sdk/lib-storage';
 import type { Project, StoredMediaArtifact, VideoMetadata } from '@/types';
+import {
+  b2BucketName,
+  b2Client,
+  deleteObjectVersion,
+  deleteOlderObjectVersions,
+  getB2Object,
+  projectMediaKey,
+  signedB2ReadUrl,
+} from '@/lib/b2';
 import { IS_VERCEL, projectDir } from '@/lib/paths';
+import { assertCurrentProject } from '@/lib/persistence';
 
 async function exists(filename: string) {
   try {
@@ -17,16 +27,16 @@ async function exists(filename: string) {
   }
 }
 
-async function downloadPrivateBlob(pathname: string, targetPath: string, expectedSize?: number) {
+async function downloadPrivateObject(key: string, targetPath: string, expectedSize?: number) {
   await mkdir(path.dirname(targetPath), { recursive: true });
   const partialPath = `${targetPath}.${randomUUID()}.part`;
   try {
-    const response = await get(pathname, { access: 'private', useCache: false });
-    if (!response || response.statusCode !== 200 || !response.stream) {
-      throw new Error('Object storage returned an empty response.');
-    }
-
-    await pipeline(Readable.fromWeb(response.stream as never), createWriteStream(partialPath));
+    const response = await getB2Object(key);
+    if (!response.Body) throw new Error('Object storage returned an empty response.');
+    const body = response.Body instanceof Readable
+      ? response.Body
+      : Readable.from(response.Body as unknown as AsyncIterable<Uint8Array>);
+    await pipeline(body, createWriteStream(partialPath));
     const downloaded = await stat(partialPath);
     if (expectedSize && downloaded.size !== expectedSize) {
       throw new Error(`Downloaded ${downloaded.size} of ${expectedSize} bytes.`);
@@ -44,23 +54,23 @@ export async function materializeVideo(video: VideoMetadata, projectId: string) 
     ? path.join(projectDir(projectId), path.basename(video.storedPath || video.filename))
     : video.storedPath;
   if (await exists(targetPath)) return targetPath;
-  if (video.storageProvider !== 'vercel-blob' || !video.storageUrl) {
+  if (video.storageProvider !== 'backblaze-b2' || !video.storageKey) {
     throw new Error('The uploaded source file could not be located.');
   }
 
-  // FFmpeg needs a seekable local file, but this copy is invocation-scoped
-  // under /tmp on Vercel and is never treated as persistent project storage.
-  return downloadPrivateBlob(video.storageKey || video.storageUrl, targetPath, video.size || undefined);
+  // FFmpeg scratch materialisation is invocation-scoped under /tmp on Vercel.
+  // The persistent source remains private in B2.
+  return downloadPrivateObject(video.storageKey, targetPath, video.size || undefined);
 }
 
 export async function processingInputForVideo(video: VideoMetadata, projectId: string) {
-  if (IS_VERCEL && video.storageProvider === 'vercel-blob' && (video.storageKey || video.storageUrl)) {
-    // FFmpeg and ffprobe can seek over HTTPS. A short-lived signed URL avoids
-    // copying a multi-gigabyte source into /tmp before the real work starts.
+  if (IS_VERCEL && video.storageProvider === 'backblaze-b2' && video.storageKey) {
+    // FFmpeg and ffprobe can seek over a short-lived private HTTPS URL, avoiding
+    // a separate full source download when the codec operation supports it.
     return {
-      input: await signedBlobReadUrl(video.storageKey || video.storageUrl!),
+      input: await signedB2ReadUrl(video.storageKey),
       materialized: false,
-      mode: 'private-blob-stream' as const,
+      mode: 'private-b2-stream' as const,
     };
   }
   return {
@@ -77,21 +87,36 @@ export async function persistProjectMedia(
   contentType: string,
 ): Promise<StoredMediaArtifact | null> {
   if (!IS_VERCEL) return null;
+  await assertCurrentProject(project.id);
   const info = await stat(localPath);
-  const stored = await put(`brayo/media/projects/${project.id}/${filename}`, createReadStream(localPath), {
-    access: 'private',
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    contentType,
-    multipart: true,
-  });
+  const key = projectMediaKey(project.id, filename);
+  const stored = await new Upload({
+    client: b2Client(),
+    params: {
+      Bucket: b2BucketName(),
+      Key: key,
+      Body: createReadStream(localPath),
+      ContentType: contentType,
+      CacheControl: 'private, max-age=0, must-revalidate',
+    },
+    queueSize: 3,
+    partSize: 16 * 1024 * 1024,
+    leavePartsOnError: false,
+  }).done();
+  try {
+    await assertCurrentProject(project.id);
+  } catch (error) {
+    await deleteObjectVersion(key, stored.VersionId);
+    throw error;
+  }
+  await deleteOlderObjectVersions(key, stored.VersionId);
   const artifact: StoredMediaArtifact = {
-    provider: 'vercel-blob',
-    url: stored.url,
-    pathname: stored.pathname,
-    contentType: stored.contentType,
+    provider: 'backblaze-b2',
+    key,
+    contentType,
     size: info.size,
-    etag: stored.etag,
+    etag: stored.ETag || '',
+    versionId: stored.VersionId,
   };
   project.media ||= {};
   project.media[filename] = artifact;
@@ -102,21 +127,12 @@ export async function materializeProjectMedia(project: Project, filename: string
   const targetPath = path.join(projectDir(project.id), path.basename(filename));
   if (await exists(targetPath)) return targetPath;
   const artifact = project.media?.[filename];
-  if (!IS_VERCEL || !artifact) throw new Error(`Project media ${filename} could not be located.`);
-  return downloadPrivateBlob(artifact.pathname, targetPath, artifact.size || undefined);
+  if (!IS_VERCEL || !artifact || artifact.provider !== 'backblaze-b2') {
+    throw new Error(`Project media ${filename} could not be located.`);
+  }
+  return downloadPrivateObject(artifact.key, targetPath, artifact.size || undefined);
 }
 
-export async function signedBlobReadUrl(pathname: string, download = false) {
-  const validUntil = Date.now() + 60 * 60 * 1000;
-  const signedToken = await issueSignedToken({ pathname, operations: ['get'], validUntil });
-  const { presignedUrl } = await presignUrl(signedToken, {
-    access: 'private',
-    operation: 'get',
-    pathname,
-    validUntil,
-  });
-  if (!download) return presignedUrl;
-  const url = new URL(presignedUrl);
-  url.searchParams.set('download', '1');
-  return url.toString();
+export async function signedObjectReadUrl(key: string, downloadFilename?: string) {
+  return signedB2ReadUrl(key, downloadFilename);
 }

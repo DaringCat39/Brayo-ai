@@ -112,18 +112,18 @@ export async function prepareVideoStep(projectId: string): Promise<PreparedVideo
   const state = analysisState(project);
   const reusableTranscript = project.transcript.length > 0 && !['pending', 'signal-only'].includes(project.transcriptionMode);
   if (state.completedStages.includes('video-prepared') && project.video.duration > 0 && project.thumbnailUrl) {
-    logPipelineTiming({ projectId, stage: 'blobMaterialization', detail: 'Prepared video checkpoint', cached: true }, 0);
+    logPipelineTiming({ projectId, stage: 'objectMaterialization', detail: 'Prepared video checkpoint', cached: true }, 0);
     return { duration: project.video.duration, hasReusableTranscript: reusableTranscript };
   }
 
-  setAnalysing(project, 5, 'Preparing video', 'Opening the private Blob stream and reading video metadata');
+  setAnalysing(project, 5, 'Preparing video', 'Opening the private object stream and reading video metadata');
   await saveProject(project);
   const originalVideo = project.video;
   const sourceTiming = await measurePipelineStage(
-    { projectId, stage: 'blobMaterialization', detail: 'Resolve seekable private Blob input' },
+    { projectId, stage: 'objectMaterialization', detail: 'Resolve seekable private B2 input' },
     () => processingInputForVideo(originalVideo, project.id),
   );
-  recordProjectTiming(project, 'blobMaterialization', sourceTiming.durationMs, sourceTiming.value.mode);
+  recordProjectTiming(project, 'objectMaterialization', sourceTiming.durationMs, sourceTiming.value.mode);
 
   const directory = projectDir(project.id);
   const thumbnailPath = path.join(directory, 'thumbnail.jpg');
@@ -136,8 +136,8 @@ export async function prepareVideoStep(projectId: string): Promise<PreparedVideo
       ...metadata,
       storedPath: originalVideo.storedPath,
       storageProvider: originalVideo.storageProvider,
-      storageUrl: originalVideo.storageUrl,
       storageKey: originalVideo.storageKey,
+      storageVersionId: originalVideo.storageVersionId,
     };
     await persistProjectMedia(project, 'thumbnail.jpg', thumbnailPath, 'image/jpeg');
     project.thumbnailUrl = `/api/media/${project.id}/thumbnail.jpg`;

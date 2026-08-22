@@ -2,10 +2,11 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { storageErrorDetails } from '@/lib/b2';
 import { getProject } from '@/lib/persistence';
 import { IS_VERCEL, projectWorkspacePath } from '@/lib/paths';
-import { signedBlobReadUrl } from '@/services/storage';
+import { signedObjectReadUrl } from '@/services/storage';
 
 const contentTypes: Record<string, string> = {
   '.mp4': 'video/mp4',
@@ -25,21 +26,32 @@ const contentTypes: Record<string, string> = {
 
 export async function GET(request: NextRequest, context: { params: Promise<{ projectId: string; filename: string }> }) {
   const { projectId, filename } = await context.params;
-  if (filename !== path.basename(filename)) return new Response('Invalid path.', { status: 400 });
+  if (filename !== path.basename(filename)) {
+    return NextResponse.json({ error: 'Invalid path.', code: 'INVALID_MEDIA_PATH', retryable: false }, { status: 400 });
+  }
   if (IS_VERCEL) {
-    const project = await getProject(projectId);
-    const artifact = project?.media?.[filename];
-    if (!artifact) return new Response('File not found.', { status: 404 });
     try {
-      const signedUrl = await signedBlobReadUrl(artifact.pathname, request.nextUrl.searchParams.get('download') === '1');
+      const project = await getProject(projectId);
+      const artifact = project?.media?.[filename];
+      if (!artifact) {
+        return NextResponse.json({ error: 'File not found.', code: 'MEDIA_NOT_FOUND', retryable: false }, { status: 404 });
+      }
+      const download = request.nextUrl.searchParams.get('download') === '1' ? filename : undefined;
+      const signedUrl = await signedObjectReadUrl(artifact.key, download);
       return Response.redirect(signedUrl, 307);
-    } catch {
-      return new Response('File not found.', { status: 404 });
+    } catch (error) {
+      const detail = storageErrorDetails(error, 'Could not open the stored media.');
+      return NextResponse.json(
+        { error: detail.error, code: detail.code, retryable: detail.retryable },
+        { status: detail.status },
+      );
     }
   }
   const directory = projectWorkspacePath(projectId);
   const filePath = path.resolve(directory, filename);
-  if (!filePath.startsWith(path.resolve(directory) + path.sep)) return new Response('Invalid path.', { status: 400 });
+  if (!filePath.startsWith(path.resolve(directory) + path.sep)) {
+    return NextResponse.json({ error: 'Invalid path.', code: 'INVALID_MEDIA_PATH', retryable: false }, { status: 400 });
+  }
   try {
     const info = await stat(filePath);
     const type = contentTypes[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
@@ -71,6 +83,6 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
       headers: { ...commonHeaders, 'Content-Length': String(info.size) },
     });
   } catch {
-    return new Response('File not found.', { status: 404 });
+    return NextResponse.json({ error: 'File not found.', code: 'MEDIA_NOT_FOUND', retryable: false }, { status: 404 });
   }
 }

@@ -9,8 +9,7 @@ export const VIDEO_CONTENT_TYPES = [
   'application/octet-stream',
 ] as const;
 
-export const BLOB_VIDEO_PREFIX = 'brayo/source-videos/';
-export const DEFAULT_MAX_VIDEO_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+export const DEFAULT_MAX_VIDEO_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
 
 export function isAllowedVideoExtension(extension: string) {
   return (VIDEO_EXTENSIONS as readonly string[]).includes(extension.toLowerCase());

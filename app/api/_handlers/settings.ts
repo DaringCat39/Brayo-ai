@@ -12,7 +12,7 @@ export async function GET() {
       whisperConfigured: Boolean(process.env.WHISPER_COMMAND),
       builtInWhisperModel: process.env.LOCAL_WHISPER_MODEL || 'Xenova/whisper-tiny.en',
       ffmpegReady: await ffmpegReady(),
-      storagePath: IS_VERCEL ? 'Vercel Blob (private)' : DATA_DIR,
+      storagePath: IS_VERCEL ? 'Backblaze B2 (private)' : DATA_DIR,
       integrations: await publicIntegrationStatuses(),
     },
   });

@@ -13,7 +13,7 @@ export type FramingMode = 'auto' | 'face' | 'centre' | 'split' | 'original';
 export type EditStyle = 'clean' | 'viral' | 'cinematic' | 'meme' | 'podcast' | 'gaming';
 export type ClipCategory = 'Funny' | 'Emotional' | 'Informative' | 'Controversial' | 'Story' | 'Quote' | 'High energy';
 
-export type UploadStorageProvider = 'local' | 'vercel-blob';
+export type UploadStorageProvider = 'local' | 'backblaze-b2';
 
 export interface UploadCapabilities {
   provider: UploadStorageProvider;
@@ -22,30 +22,46 @@ export interface UploadCapabilities {
   localFallback: boolean;
 }
 
+export interface MultipartUploadSession {
+  projectId: string;
+  sessionToken: string;
+  key: string;
+  partSize: number;
+  partCount: number;
+}
+
+export interface PresignedUploadPart {
+  partNumber: number;
+  url: string;
+}
+
 export interface CompletedVideoUpload {
   provider: Exclude<UploadStorageProvider, 'local'>;
-  url: string;
-  pathname: string;
+  projectId: string;
+  key: string;
+  bucket: string;
   contentType: string;
   size: number;
   etag: string;
+  versionId?: string;
+  sessionToken: string;
 }
 
 export interface StoredMediaArtifact {
-  provider: 'vercel-blob';
-  url: string;
-  pathname: string;
+  provider: 'backblaze-b2';
+  key: string;
   contentType: string;
   size: number;
   etag: string;
+  versionId?: string;
 }
 
 export interface VideoMetadata {
   filename: string;
   storedPath: string;
   storageProvider?: UploadStorageProvider;
-  storageUrl?: string;
   storageKey?: string;
+  storageVersionId?: string;
   size: number;
   duration: number;
   width: number;
@@ -180,7 +196,7 @@ export interface JobState {
 }
 
 export type ProcessingTimingStage =
-  | 'blobMaterialization'
+  | 'objectMaterialization'
   | 'audioExtraction'
   | 'transcription'
   | 'sceneAnalysis'
@@ -237,6 +253,7 @@ export interface Project {
   transcriptionMode: 'pending' | 'local-whisper' | 'built-in-whisper' | 'openai' | 'signal-only';
   preferredDuration: 75 | 90 | 120 | 180;
   defaultCaptionPreset?: CaptionSettings['preset'];
+  storageReady?: boolean;
   analysis?: ProjectAnalysisState;
   job: JobState;
   thumbnailUrl?: string;

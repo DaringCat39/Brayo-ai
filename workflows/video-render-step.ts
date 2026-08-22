@@ -43,7 +43,7 @@ export async function renderProjectClipStep(
     const filename = `export-${clip.id}.mp4`;
     const outputPath = path.join(projectDir(project.id), filename);
     const source = await measurePipelineStage(
-      { projectId, stage: 'blobMaterialization', detail: `Render source for ${clip.id}` },
+      { projectId, stage: 'objectMaterialization', detail: `Render source for ${clip.id}` },
       () => processingInputForVideo(project.video!, project.id),
     );
     const selectedMusic = clip.music?.enabled

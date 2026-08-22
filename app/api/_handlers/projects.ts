@@ -1,15 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import path from 'node:path';
-import { head } from '@vercel/blob';
 import { NextRequest, NextResponse } from 'next/server';
-import type { CaptionSettings, CompletedVideoUpload, Project } from '@/types';
-import { listProjects, saveProject } from '@/lib/persistence';
+import type { CaptionSettings, CompletedVideoUpload, Project, UploadStorageProvider } from '@/types';
+import {
+  b2BucketName,
+  b2Configured,
+  headB2Object,
+  projectSourceKey,
+  storageErrorDetails,
+  verifyUploadSession,
+} from '@/lib/b2';
+import { activateCurrentProject, getProject, listProjects } from '@/lib/persistence';
 import { CLIP_DURATION_OPTIONS, DEFAULT_CLIP_SECONDS } from '@/lib/clip-duration';
 import { IS_VERCEL, projectDir, projectWorkspacePath } from '@/lib/paths';
-import { BLOB_VIDEO_PREFIX, isAllowedVideoExtension } from '@/lib/upload-config';
+import { isAllowedVideoExtension } from '@/lib/upload-config';
 import { now, safeFilename, titleFromFilename } from '@/lib/utils';
 import { enqueueAnalysis } from '@/services/queue';
 
@@ -33,22 +41,26 @@ function captionPreset(value: unknown): CaptionSettings['preset'] {
   return captionPresets.includes(value as CaptionSettings['preset']) ? value as CaptionSettings['preset'] : 'bold';
 }
 
+function jsonError(error: string, code: string, status: number, retryable = false) {
+  return NextResponse.json({ error, code, retryable }, { status });
+}
+
 async function makeProject(options: {
   id?: string;
   filename: string;
   size: number;
   sourceUrl: string;
-  storageProvider: 'local' | 'vercel-blob';
-  storageUrl?: string;
+  storageProvider: UploadStorageProvider;
   storageKey?: string;
+  storageVersionId?: string;
   preferredDuration: Project['preferredDuration'];
   defaultCaptionPreset: CaptionSettings['preset'];
 }) {
   const extension = path.extname(options.filename).toLowerCase();
   const id = options.id || randomUUID();
   const storedName = `source${extension}`;
-  // Merely registering a completed Blob upload must not create a filesystem
-  // directory. The path is only a future FFmpeg workspace location.
+  // Registering a completed object upload does not create a persistent Vercel
+  // directory. This is only the future /tmp FFmpeg workspace location.
   const outputPath = path.join(projectWorkspacePath(id), storedName);
   const createdAt = now();
   const project: Project = {
@@ -62,8 +74,8 @@ async function makeProject(options: {
       filename: safeFilename(options.filename),
       storedPath: outputPath,
       storageProvider: options.storageProvider,
-      storageUrl: options.storageUrl,
       storageKey: options.storageKey,
+      storageVersionId: options.storageVersionId,
       size: options.size,
       duration: 0,
       width: 0,
@@ -77,87 +89,107 @@ async function makeProject(options: {
     transcriptionMode: 'pending',
     preferredDuration: options.preferredDuration,
     defaultCaptionPreset: options.defaultCaptionPreset,
+    storageReady: options.storageProvider === 'local',
     job: {
       id: `analysis:${id}`,
       type: 'analysis',
       status: 'queued',
       stage: 'Queued',
       progress: 2,
-      detail: options.storageProvider === 'vercel-blob'
+      detail: options.storageProvider === 'backblaze-b2'
         ? 'Direct upload complete; analysis queued'
         : 'Your upload is safely stored on this device',
       updatedAt: createdAt,
     },
   };
-  await saveProject(project);
+  await activateCurrentProject(project);
   await enqueueAnalysis(id);
   return project;
 }
 
 async function registerDirectUpload(request: NextRequest) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return NextResponse.json({ error: 'Direct object storage is not configured.' }, { status: 503 });
+  if (!b2Configured()) {
+    return jsonError('Private object storage is not configured.', 'STORAGE_NOT_CONFIGURED', 503);
   }
 
   let body: DirectProjectRequest;
   try {
     body = await request.json() as DirectProjectRequest;
   } catch {
-    return NextResponse.json({ error: 'Invalid upload metadata.' }, { status: 400 });
+    return jsonError('Invalid upload metadata.', 'INVALID_JSON', 400);
   }
 
-  const extension = path.extname(body.filename || '').toLowerCase();
   const upload = body.upload;
-  if (
-    !isAllowedVideoExtension(extension)
-    || upload?.provider !== 'vercel-blob'
-    || !upload.url
-    || !upload.pathname?.startsWith(BLOB_VIDEO_PREFIX)
-  ) {
-    return NextResponse.json({ error: 'Invalid video upload metadata.' }, { status: 400 });
-  }
-
   try {
-    const uploadUrl = new URL(upload.url);
-    if (!uploadUrl.hostname.endsWith('.private.blob.vercel-storage.com')) {
-      return NextResponse.json({ error: 'The upload does not belong to the configured private Blob store.' }, { status: 400 });
+    if (!upload || upload.provider !== 'backblaze-b2' || !upload.sessionToken) {
+      return jsonError('Invalid video upload metadata.', 'INVALID_UPLOAD_METADATA', 400);
     }
-    const stored = await head(upload.url);
+    const claims = verifyUploadSession(upload.sessionToken);
+    const extension = path.extname(claims.filename).toLowerCase();
     if (
-      stored.pathname !== upload.pathname
-      || stored.size !== upload.size
-      || stored.etag !== upload.etag
-      || stored.contentType !== upload.contentType
-      || !stored.pathname.startsWith(BLOB_VIDEO_PREFIX)
+      !isAllowedVideoExtension(extension)
+      || upload.projectId !== claims.projectId
+      || upload.key !== claims.key
+      || upload.key !== projectSourceKey(claims.projectId, extension)
+      || upload.bucket !== b2BucketName()
+      || upload.size !== claims.size
     ) {
-      return NextResponse.json({ error: 'The completed upload could not be verified.' }, { status: 400 });
+      return jsonError('Invalid video upload metadata.', 'INVALID_UPLOAD_METADATA', 400);
     }
 
-    // Only compact, verified metadata reaches this Function. The video bytes
-    // have already travelled directly from the browser to object storage.
-    const id = randomUUID();
+    const stored = await headB2Object(claims.key);
+    if (
+      stored.ContentLength !== claims.size
+      || stored.ETag !== upload.etag
+      || (upload.versionId && stored.VersionId !== upload.versionId)
+    ) {
+      return jsonError('The completed upload could not be verified.', 'UPLOAD_VERIFICATION_FAILED', 400, true);
+    }
+
+    // Registration is idempotent: if the small response was lost after the
+    // project was created, retrying must not erase analysis already in flight.
+    const existing = await getProject(claims.projectId);
+    if (existing?.video?.storageKey === claims.key && existing.video.size === claims.size) {
+      if (!existing.storageReady) {
+        await activateCurrentProject(existing);
+        await enqueueAnalysis(existing.id);
+      }
+      return NextResponse.json({ project: existing });
+    }
+    if (existing) {
+      return jsonError('This upload identifier is already in use.', 'UPLOAD_ALREADY_REGISTERED', 409);
+    }
+
+    // Only verified metadata reaches this Function. Video bytes travelled
+    // directly from the browser to the private B2 bucket.
     const project = await makeProject({
-      id,
-      filename: body.filename,
-      size: stored.size,
-      sourceUrl: `/api/projects/${id}/source`,
-      storageProvider: 'vercel-blob',
-      storageUrl: stored.url,
-      storageKey: stored.pathname,
+      id: claims.projectId,
+      filename: claims.filename,
+      size: claims.size,
+      sourceUrl: `/api/projects/${claims.projectId}/source`,
+      storageProvider: 'backblaze-b2',
+      storageKey: claims.key,
+      storageVersionId: stored.VersionId,
       preferredDuration: preferredDuration(body.preferredDuration),
       defaultCaptionPreset: captionPreset(body.captionPreset),
     });
     return NextResponse.json({ project }, { status: 201 });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? `Could not verify the completed upload: ${error.message}` : 'Could not verify the completed upload.' },
-      { status: 400 },
-    );
+    if (error instanceof Error && /upload session|Invalid project/i.test(error.message)) {
+      return jsonError(error.message, 'INVALID_UPLOAD_SESSION', 400);
+    }
+    const detail = storageErrorDetails(error, 'The completed upload could not be verified in object storage.');
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable);
   }
 }
 
 export async function GET() {
-  return NextResponse.json({ projects: await listProjects() });
+  try {
+    return NextResponse.json({ projects: await listProjects() });
+  } catch (error) {
+    const detail = storageErrorDetails(error, 'Projects could not be read from object storage.');
+    return jsonError(detail.error, detail.code, detail.status, detail.retryable);
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -166,15 +198,12 @@ export async function POST(request: NextRequest) {
   }
 
   if (IS_VERCEL) {
-    return NextResponse.json(
-      { error: 'Vercel video uploads must use the direct Blob upload flow.' },
-      { status: 409 },
-    );
+    return jsonError('Production video uploads must use the direct object-storage flow.', 'DIRECT_UPLOAD_REQUIRED', 409);
   }
 
-  if (!request.body) return NextResponse.json({ error: 'No video data received.' }, { status: 400 });
+  if (!request.body) return jsonError('No video data received.', 'EMPTY_UPLOAD', 400);
   const rawName = request.headers.get('x-file-name');
-  if (!rawName) return NextResponse.json({ error: 'Missing file name.' }, { status: 400 });
+  if (!rawName) return jsonError('Missing file name.', 'MISSING_FILENAME', 400);
   let filename = rawName;
   try {
     filename = decodeURIComponent(rawName);
@@ -183,7 +212,7 @@ export async function POST(request: NextRequest) {
   }
   const extension = path.extname(filename).toLowerCase();
   if (!isAllowedVideoExtension(extension)) {
-    return NextResponse.json({ error: 'Use an MP4, MOV, MKV, WebM or M4V video.' }, { status: 415 });
+    return jsonError('Use an MP4, MOV, MKV, WebM or M4V video.', 'VIDEO_TYPE_NOT_ALLOWED', 415);
   }
   const id = randomUUID();
   const storedName = `source${extension}`;
@@ -191,11 +220,12 @@ export async function POST(request: NextRequest) {
   try {
     await pipeline(Readable.fromWeb(request.body as never), createWriteStream(outputPath));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Upload failed.' }, { status: 500 });
+    await unlink(outputPath).catch(() => undefined);
+    return jsonError(error instanceof Error ? error.message : 'Upload failed.', 'LOCAL_UPLOAD_FAILED', 500, true);
   }
   const size = Number(request.headers.get('content-length') || 0);
-  // Local development keeps the original streamed upload path. It writes the
-  // request incrementally and never buffers the complete video in memory.
+  // Local development retains its streamed upload path and never buffers the
+  // complete video in memory.
   const project = await makeProject({
     id,
     filename,

@@ -2,12 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { upload as uploadBlob } from '@vercel/blob/client';
 import { ArrowUp, Captions, Clock3, FileVideo, LockKeyhole, UploadCloud, X } from 'lucide-react';
 import { formatBytes } from '@/lib/utils';
-import type { CaptionSettings, CompletedVideoUpload, Project, UploadCapabilities } from '@/types';
+import type {
+  CaptionSettings,
+  CompletedVideoUpload,
+  MultipartUploadSession,
+  PresignedUploadPart,
+  Project,
+  UploadCapabilities,
+} from '@/types';
 import { DEFAULT_CLIP_SECONDS } from '@/lib/clip-duration';
-import { BLOB_VIDEO_PREFIX } from '@/lib/upload-config';
 
 const accepted = '.mp4,.mov,.mkv,.webm,.m4v,video/mp4,video/quicktime,video/webm,video/x-matroska';
 const durationOptions: Array<{ value: Project['preferredDuration']; label: string; detail: string }> = [
@@ -27,6 +32,88 @@ const captionOptions: Array<{ value: CaptionSettings['preset']; label: string }>
   { value: 'minimal', label: 'Minimal' },
 ];
 
+interface ActiveMultipartUpload {
+  fingerprint: string;
+  session: MultipartUploadSession;
+  completedParts: Map<number, string>;
+  completedUpload?: CompletedVideoUpload;
+}
+
+function uploadFingerprint(file: File) {
+  return `${file.name}:${file.size}:${file.lastModified}:${file.type}`;
+}
+
+function responseErrorMessage(text: string, status: number, fallback: string) {
+  const trimmed = text.trim();
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed) as { error?: string | { message?: string }; message?: string };
+      if (typeof parsed.error === 'string') return parsed.error;
+      if (parsed.error?.message) return parsed.error.message;
+      if (parsed.message) return parsed.message;
+    } catch {
+      const xmlMessage = trimmed.match(/<Message>([\s\S]*?)<\/Message>/i)?.[1];
+      const xmlCode = trimmed.match(/<Code>([\s\S]*?)<\/Code>/i)?.[1];
+      if (xmlMessage) return `${xmlCode ? `${xmlCode}: ` : ''}${xmlMessage}`;
+      if (!trimmed.startsWith('<')) return trimmed.slice(0, 300);
+    }
+  }
+  return `${fallback} (HTTP ${status || 'network error'}).`;
+}
+
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  const text = await response.text();
+  if (!response.ok) throw new Error(responseErrorMessage(text, response.status, 'Storage request failed'));
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(responseErrorMessage(text, response.status, 'The storage service returned an unreadable response'));
+  }
+}
+
+function uploadPart(url: string, data: Blob, onProgress: (loaded: number) => void) {
+  return new Promise<string>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('PUT', url);
+    request.upload.onprogress = (event) => onProgress(event.loaded);
+    request.onerror = () => reject(new Error('The connection was interrupted while uploading a video part.'));
+    request.onabort = () => reject(new Error('The video part upload was cancelled.'));
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        const etag = request.getResponseHeader('ETag');
+        if (etag) resolve(etag);
+        else reject(new Error('Object storage completed a part without returning its ETag. Check the bucket CORS ExposeHeaders setting.'));
+        return;
+      }
+      reject(new Error(responseErrorMessage(request.responseText, request.status, 'Object storage rejected a video part')));
+    };
+    request.send(data);
+  });
+}
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>) {
+  let cursor = 0;
+  const failures: unknown[] = [];
+  async function runWorker() {
+    while (cursor < items.length) {
+      const item = items[cursor];
+      cursor += 1;
+      try {
+        await worker(item);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runWorker));
+  if (failures.length) throw failures[0];
+}
+
 export function UploadDropzone({ compact = false }: { compact?: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
@@ -41,6 +128,8 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
   const [captionPreset, setCaptionPreset] = useState<CaptionSettings['preset']>('bold');
   const [capabilities, setCapabilities] = useState<UploadCapabilities | null>(null);
   const uploadStartedAt = useRef(0);
+  const speedBaseBytes = useRef(0);
+  const activeUpload = useRef<ActiveMultipartUpload | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -61,21 +150,30 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
       setError('Choose an MP4, MOV, MKV or WebM video.');
       return;
     }
+    const previous = activeUpload.current;
+    if (previous && !previous.completedUpload) {
+      void fetch('/api/uploads/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'abort', sessionToken: previous.session.sessionToken }),
+        keepalive: true,
+      });
+    }
+    activeUpload.current = null;
     setError('');
+    setProgress(0);
     setFile(next);
   }
 
   function reportProgress(loaded: number, total: number, percentage?: number) {
     const elapsedSeconds = Math.max(0.05, (performance.now() - uploadStartedAt.current) / 1000);
     setProgress(Math.max(0, Math.min(100, Math.round(percentage ?? (loaded / Math.max(1, total)) * 100))));
-    setUploadSpeed(loaded / elapsedSeconds);
+    setUploadSpeed(Math.max(0, loaded - speedBaseBytes.current) / elapsedSeconds);
   }
 
   async function getCapabilities() {
     if (capabilities) return capabilities;
-    const response = await fetch('/api/uploads', { cache: 'no-store' });
-    if (!response.ok) throw new Error('The upload service is unavailable. Please try again.');
-    const next = await response.json() as UploadCapabilities;
+    const next = await requestJson<UploadCapabilities>('/api/uploads', { cache: 'no-store' });
     setCapabilities(next);
     return next;
   }
@@ -96,9 +194,9 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
         try {
           const body = JSON.parse(request.responseText) as { project?: Project; error?: string };
           if (request.status >= 200 && request.status < 300 && body.project) resolve(body.project);
-          else reject(new Error(body.error || 'Upload failed.'));
+          else reject(new Error(body.error || responseErrorMessage(request.responseText, request.status, 'Upload failed')));
         } catch {
-          reject(new Error('The server returned an unexpected response.'));
+          reject(new Error(responseErrorMessage(request.responseText, request.status, 'The local upload failed')));
         }
       };
       request.send(video);
@@ -106,51 +204,129 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
   }
 
   async function registerDirectUpload(video: File) {
-    const blobFilename = video.name
-      .normalize('NFKD')
-      .replace(/[^a-zA-Z0-9._-]/g, '-')
-      .replace(/-+/g, '-')
-      .slice(-140);
-    const blob = await uploadBlob(`${BLOB_VIDEO_PREFIX}${blobFilename}`, video, {
-      access: 'private',
-      handleUploadUrl: '/api/uploads/token',
-      contentType: video.type || 'application/octet-stream',
-      multipart: true,
-      onUploadProgress: ({ loaded, total, percentage }) => reportProgress(loaded, total, percentage),
-    });
+    const fingerprint = uploadFingerprint(video);
+    let active = activeUpload.current;
+    if (!active || active.fingerprint !== fingerprint) {
+      const initiated = await requestJson<{ session: MultipartUploadSession }>('/api/uploads/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'initiate',
+          filename: video.name,
+          contentType: video.type || 'application/octet-stream',
+          size: video.size,
+        }),
+      });
+      active = {
+        fingerprint,
+        session: initiated.session,
+        completedParts: new Map(),
+      };
+      activeUpload.current = active;
+    }
+
+    if (!active.completedUpload) {
+      const session = active.session;
+      const bytesForPart = (partNumber: number) => {
+        const start = (partNumber - 1) * session.partSize;
+        return Math.max(0, Math.min(session.partSize, video.size - start));
+      };
+      const completedBytes = () => [...active!.completedParts.keys()]
+        .reduce((total, partNumber) => total + bytesForPart(partNumber), 0);
+      speedBaseBytes.current = completedBytes();
+      reportProgress(speedBaseBytes.current, video.size);
+      const pending = Array.from({ length: session.partCount }, (_, index) => index + 1)
+        .filter((partNumber) => !active!.completedParts.has(partNumber));
+      const inFlight = new Map<number, number>();
+      const concurrency = 4;
+      const authorizationBatchSize = concurrency * 2;
+
+      for (let offset = 0; offset < pending.length; offset += authorizationBatchSize) {
+        const batch = pending.slice(offset, offset + authorizationBatchSize);
+        setUploadStage(`Uploading parts ${offset + 1}–${Math.min(offset + batch.length, pending.length)} of ${pending.length}`);
+        const authorization = await requestJson<{ parts: PresignedUploadPart[] }>('/api/uploads/token', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'sign-parts', sessionToken: session.sessionToken, partNumbers: batch }),
+        });
+        const urls = new Map(authorization.parts.map((part) => [part.partNumber, part.url]));
+        await mapWithConcurrency(batch, concurrency, async (partNumber) => {
+          const start = (partNumber - 1) * session.partSize;
+          const end = Math.min(video.size, start + session.partSize);
+          const url = urls.get(partNumber);
+          if (!url) throw new Error(`Upload authorization for part ${partNumber} is missing.`);
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              inFlight.set(partNumber, 0);
+              const etag = await uploadPart(url, video.slice(start, end), (loaded) => {
+                inFlight.set(partNumber, loaded);
+                const totalLoaded = completedBytes() + [...inFlight.values()].reduce((sum, value) => sum + value, 0);
+                reportProgress(totalLoaded, video.size);
+              });
+              active!.completedParts.set(partNumber, etag);
+              inFlight.delete(partNumber);
+              reportProgress(completedBytes() + [...inFlight.values()].reduce((sum, value) => sum + value, 0), video.size);
+              return;
+            } catch (partError) {
+              lastError = partError;
+              inFlight.delete(partNumber);
+              if (attempt < 2) await wait(500 * (2 ** attempt));
+            }
+          }
+          throw lastError instanceof Error ? lastError : new Error(`Video part ${partNumber} failed after three attempts.`);
+        });
+      }
+
+      setUploadStage('Verifying completed upload');
+      const completed = await requestJson<{ upload: CompletedVideoUpload }>('/api/uploads/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'complete',
+          sessionToken: session.sessionToken,
+          parts: [...active.completedParts.entries()].map(([partNumber, etag]) => ({ partNumber, etag })),
+        }),
+      });
+      active.completedUpload = completed.upload;
+    }
 
     setProgress(100);
     setUploadSpeed(0);
     setUploadStage('Finalising project');
-    const upload: CompletedVideoUpload = {
-      provider: 'vercel-blob',
-      url: blob.url,
-      pathname: blob.pathname,
-      contentType: blob.contentType,
-      size: video.size,
-      etag: blob.etag,
-    };
-    const response = await fetch('/api/projects', {
+    const registered = await requestJson<{ project: Project }>('/api/projects', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ filename: video.name, preferredDuration: duration, captionPreset, upload }),
+      body: JSON.stringify({
+        filename: video.name,
+        preferredDuration: duration,
+        captionPreset,
+        upload: active.completedUpload,
+      }),
     });
-    const body = await response.json() as { project?: Project; error?: string };
-    if (!response.ok || !body.project) throw new Error(body.error || 'The uploaded video could not be registered.');
-    return body.project;
+    activeUpload.current = null;
+    return registered.project;
   }
 
   async function upload() {
     if (!file || uploading) return;
     setUploading(true);
     setError('');
-    setProgress(0);
+    const resumable = activeUpload.current?.fingerprint === uploadFingerprint(file) ? activeUpload.current : null;
+    const resumedBytes = resumable
+      ? [...resumable.completedParts.keys()].reduce((total, partNumber) => {
+        const start = (partNumber - 1) * resumable.session.partSize;
+        return total + Math.max(0, Math.min(resumable.session.partSize, file.size - start));
+      }, 0)
+      : 0;
+    setProgress(Math.round((resumedBytes / Math.max(1, file.size)) * 100));
     setUploadSpeed(0);
+    speedBaseBytes.current = resumedBytes;
     uploadStartedAt.current = performance.now();
     try {
       const storage = await getCapabilities();
       if (!storage.direct && !storage.localFallback) {
-        throw new Error('Video storage is not connected. Add a private Vercel Blob store to this deployment.');
+        throw new Error('Private object storage is not configured for this deployment.');
       }
       setUploadStage(storage.direct ? 'Uploading directly to storage' : 'Uploading to local server');
       const project = storage.direct ? await registerDirectUpload(file) : await registerLocalUpload(file);
@@ -162,6 +338,23 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
       setUploadSpeed(0);
       setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.');
     }
+  }
+
+  function removeVideo() {
+    const active = activeUpload.current;
+    if (active && !active.completedUpload) {
+      void fetch('/api/uploads/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'abort', sessionToken: active.session.sessionToken }),
+        keepalive: true,
+      });
+    }
+    activeUpload.current = null;
+    setFile(null);
+    setProgress(0);
+    setUploadSpeed(0);
+    setError('');
   }
 
   if (file) {
@@ -178,7 +371,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
                 <p className="mt-1 text-xs text-white/35">{formatBytes(file.size)} · Ready for secure upload</p>
               </div>
               {!uploading && (
-                <button onClick={() => setFile(null)} className="grid h-8 w-8 place-items-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white" aria-label="Remove video">
+                <button onClick={removeVideo} className="grid h-8 w-8 place-items-center rounded-lg text-white/35 transition hover:bg-white/[0.06] hover:text-white" aria-label="Remove video">
                   <X className="h-4 w-4" />
                 </button>
               )}
@@ -226,7 +419,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
         {compact && !uploading && <div className="mt-4 flex gap-2 text-[9px] text-white/38"><span className="rounded-lg bg-white/[0.05] px-2 py-1">90 sec clips</span><span className="rounded-lg bg-white/[0.05] px-2 py-1">Bold live captions</span></div>}
         {!uploading && (
           <button onClick={upload} className="button-primary mt-5 w-full">
-            Generate {duration >= 120 ? `${duration / 60} min` : `${duration} sec`} clips <ArrowUp className="h-4 w-4 rotate-45" />
+            {error && activeUpload.current ? 'Retry upload' : `Generate ${duration >= 120 ? `${duration / 60} min` : `${duration} sec`} clips`} <ArrowUp className="h-4 w-4 rotate-45" />
           </button>
         )}
         {error && <p className="mt-3 text-xs text-red-300">{error}</p>}

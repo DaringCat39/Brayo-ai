@@ -8,7 +8,7 @@ export const LOCAL_DATA_DIR = path.join(process.cwd(), '.data');
 export const DATA_DIR = IS_VERCEL ? path.join(os.tmpdir(), 'brayo') : LOCAL_DATA_DIR;
 export const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 // SQLite remains a localhost-only implementation. All Vercel callers go
-// through lib/persistence.ts, which stores private JSON objects in Blob.
+// through lib/persistence.ts, which stores private JSON objects in B2.
 export const DB_PATH = path.join(LOCAL_DATA_DIR, 'viralcut.sqlite');
 
 export function ensureDataDirs() {

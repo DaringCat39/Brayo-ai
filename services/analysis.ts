@@ -210,7 +210,7 @@ export async function generateProjectPreviews(projectId: string) {
     const source = await processingInputForVideo(project.video, project.id);
     const pending = project.clips.filter((clip) => {
       const filename = `clip-${clip.id}.jpg`;
-      return !clip.thumbnailUrl || (project.video?.storageProvider === 'vercel-blob' && !project.media?.[filename]);
+      return !clip.thumbnailUrl || (project.video?.storageProvider === 'backblaze-b2' && !project.media?.[filename]);
     });
     let completed = project.clips.length - pending.length;
     const concurrency = 4;
