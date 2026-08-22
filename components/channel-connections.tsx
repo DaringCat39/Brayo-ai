@@ -89,7 +89,7 @@ export function ChannelConnections({ compact = false }: { compact?: boolean }) {
               </div>
               <button onClick={() => void disconnect(provider)} disabled={disconnecting === provider} className="mt-3 flex items-center gap-1.5 text-[10px] font-medium text-white/30 transition hover:text-red-300 disabled:opacity-40">{disconnecting === provider ? <LoaderCircle className="h-3 w-3 animate-spin" /> : <Unplug className="h-3 w-3" />} Disconnect account</button>
             </> : <div className="mt-4 border-t border-white/[0.06] pt-3">
-              <p className="flex items-start gap-1.5 text-[10px] leading-4 text-white/35"><ShieldCheck className="mt-0.5 h-3 w-3 shrink-0 text-lime" /> Sign in on {provider === 'youtube' ? 'Google' : 'TikTok'} and approve video publishing only. ViralCut never sees your password.</p>
+              <p className="flex items-start gap-1.5 text-[10px] leading-4 text-white/35"><ShieldCheck className="mt-0.5 h-3 w-3 shrink-0 text-lime" /> Sign in on {provider === 'youtube' ? 'Google' : 'TikTok'} and approve video publishing only. Brayo.ai never sees your password.</p>
               <a href={`/api/integrations/${provider}/connect`} className="button-primary mt-3 w-full !py-2 text-[10px]">{provider === 'youtube' ? 'Continue with Google' : 'Continue with TikTok'} <ExternalLink className="h-3 w-3" /></a>
             </div>}
           </div>

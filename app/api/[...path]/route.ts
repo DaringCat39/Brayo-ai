@@ -29,13 +29,32 @@ function withParams<T extends Record<string, string>>(params: T) {
   return { params: Promise.resolve(params) };
 }
 
-function runMethod(request: NextRequest, handlers: Partial<Record<ApiMethod, RoutedHandler>>) {
+async function runMethod(
+  request: NextRequest,
+  routeId: string,
+  handlers: Partial<Record<ApiMethod, RoutedHandler>>,
+) {
   const handler = handlers[request.method as ApiMethod];
-  if (handler) return handler();
+  if (handler) {
+    const response = await handler();
+    const headers = new Headers(response.headers);
+    headers.set('x-brayo-api-route', routeId);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
   const allowed = Object.keys(handlers);
   return NextResponse.json(
     { error: 'Method not allowed.' },
-    { status: 405, headers: allowed.length ? { Allow: allowed.join(', ') } : undefined },
+    {
+      status: 405,
+      headers: {
+        ...(allowed.length ? { Allow: allowed.join(', ') } : {}),
+        'x-brayo-api-route': routeId,
+      },
+    },
   );
 }
 
@@ -43,46 +62,46 @@ async function dispatch(request: NextRequest, context: CatchAllContext) {
   const { path } = await context.params;
 
   if (path.length === 1 && path[0] === 'settings') {
-    return runMethod(request, { GET: () => settings.GET() });
+    return runMethod(request, 'settings', { GET: () => settings.GET() });
   }
 
   if (path[0] === 'uploads') {
     if (path.length === 1) {
-      return runMethod(request, { GET: () => uploads.GET() });
+      return runMethod(request, 'uploads.collection', { GET: () => uploads.GET() });
     }
     if (path.length === 2 && path[1] === 'token') {
-      return runMethod(request, { POST: () => uploads.POST(request) });
+      return runMethod(request, 'uploads.token', { POST: () => uploads.POST(request) });
     }
   }
 
   if (path[0] === 'integrations') {
     if (path.length === 1) {
-      return runMethod(request, { GET: () => integrations.GET() });
+      return runMethod(request, 'integrations.collection', { GET: () => integrations.GET() });
     }
     const providerContext = withParams({ provider: path[1] });
     if (path.length === 2) {
-      return runMethod(request, {
+      return runMethod(request, 'integrations.account', {
         PATCH: () => integrationAccount.PATCH(request, providerContext),
         DELETE: () => integrationAccount.DELETE(request, providerContext),
       });
     }
     if (path.length === 3 && path[2] === 'connect') {
-      return runMethod(request, { GET: () => integrationConnect.GET(request, providerContext) });
+      return runMethod(request, 'integrations.connect', { GET: () => integrationConnect.GET(request, providerContext) });
     }
     if (path.length === 3 && path[2] === 'callback') {
-      return runMethod(request, { GET: () => integrationCallback.GET(request, providerContext) });
+      return runMethod(request, 'integrations.callback', { GET: () => integrationCallback.GET(request, providerContext) });
     }
   }
 
   if (path.length === 3 && path[0] === 'media') {
-    return runMethod(request, {
+    return runMethod(request, 'media.item', {
       GET: () => media.GET(request, withParams({ projectId: path[1], filename: path[2] })),
     });
   }
 
   if (path[0] === 'projects') {
     if (path.length === 1) {
-      return runMethod(request, {
+      return runMethod(request, 'projects.collection', {
         GET: () => projects.GET(),
         POST: () => projects.POST(request),
       });
@@ -90,41 +109,44 @@ async function dispatch(request: NextRequest, context: CatchAllContext) {
 
     const projectContext = withParams({ id: path[1] });
     if (path.length === 2) {
-      return runMethod(request, {
+      return runMethod(request, 'projects.item', {
         GET: () => project.GET(request, projectContext),
         PATCH: () => project.PATCH(request, projectContext),
       });
     }
     if (path.length === 3 && path[2] === 'analyse') {
-      return runMethod(request, { POST: () => projectAnalyse.POST(request, projectContext) });
+      return runMethod(request, 'projects.analyse', { POST: () => projectAnalyse.POST(request, projectContext) });
     }
     if (path.length === 3 && path[2] === 'source') {
-      return runMethod(request, { GET: () => projectSource.GET(request, projectContext) });
+      return runMethod(request, 'projects.source', { GET: () => projectSource.GET(request, projectContext) });
     }
     if (path.length === 3 && path[2] === 'music') {
-      return runMethod(request, { POST: () => projectMusic.POST(request, projectContext) });
+      return runMethod(request, 'projects.music', { POST: () => projectMusic.POST(request, projectContext) });
     }
     if (path.length === 3 && path[2] === 'render-batch') {
-      return runMethod(request, { POST: () => projectRenderBatch.POST(request, projectContext) });
+      return runMethod(request, 'projects.render-batch', { POST: () => projectRenderBatch.POST(request, projectContext) });
     }
     if (path.length >= 4 && path[2] === 'clips') {
       const clipContext = withParams({ id: path[1], clipId: path[3] });
       if (path.length === 4) {
-        return runMethod(request, { PATCH: () => clip.PATCH(request, clipContext) });
+        return runMethod(request, 'projects.clips.item', { PATCH: () => clip.PATCH(request, clipContext) });
       }
       if (path.length === 5 && path[4] === 'focus') {
-        return runMethod(request, { POST: () => clipFocus.POST(request, clipContext) });
+        return runMethod(request, 'projects.clips.focus', { POST: () => clipFocus.POST(request, clipContext) });
       }
       if (path.length === 5 && path[4] === 'publish') {
-        return runMethod(request, { POST: () => clipPublish.POST(request, clipContext) });
+        return runMethod(request, 'projects.clips.publish', { POST: () => clipPublish.POST(request, clipContext) });
       }
       if (path.length === 5 && path[4] === 'render') {
-        return runMethod(request, { POST: () => clipRender.POST(request, clipContext) });
+        return runMethod(request, 'projects.clips.render', { POST: () => clipRender.POST(request, clipContext) });
       }
     }
   }
 
-  return NextResponse.json({ error: 'API route not found.' }, { status: 404 });
+  return NextResponse.json(
+    { error: 'API route not found.', code: 'API_ROUTE_NOT_FOUND', retryable: false },
+    { status: 404, headers: { 'x-brayo-api-route': 'unmatched' } },
+  );
 }
 
 export async function GET(request: NextRequest, context: CatchAllContext) {

@@ -1,5 +1,5 @@
 {
-  "name": "viralcut-ai",
+  "name": "brayo-ai",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -7,6 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "smoke:api": "node scripts/smoke-api-routing.mjs",
     "storage:cors": "node scripts/configure-b2-cors.mjs"
   },
   "dependencies": {

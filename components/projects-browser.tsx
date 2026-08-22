@@ -13,9 +13,16 @@ export function ProjectsBrowser() {
   useEffect(() => {
     let mounted = true;
     async function load() {
-      const response = await fetch('/api/projects', { cache: 'no-store' });
-      const body = (await response.json()) as { projects: Project[] };
-      if (mounted) { setProjects(body.projects); setLoading(false); }
+      try {
+        const response = await fetch('/api/projects', { cache: 'no-store' });
+        const body = (await response.json()) as { projects?: Project[]; error?: string };
+        if (!response.ok || !Array.isArray(body.projects)) throw new Error(body.error || 'Projects could not be loaded.');
+        if (mounted) setProjects(body.projects);
+      } catch (error) {
+        console.error('[Brayo.ai] Project list request failed:', error);
+      } finally {
+        if (mounted) setLoading(false);
+      }
     }
     load();
     const timer = setInterval(load, 4000);

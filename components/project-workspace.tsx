@@ -607,7 +607,7 @@ function PublishPanel({ projectId, draft, update, save, reload }: { projectId: s
           </div>;
         })}
       </div>
-      {(settings.youtube || settings.tiktok) && <p className="mt-2 rounded-lg border border-lime/10 bg-lime/[0.035] p-2 text-[9px] leading-4 text-lime/65">When you press Export MP4, ViralCut finishes the render first, then uploads it to each selected connected account.</p>}
+      {(settings.youtube || settings.tiktok) && <p className="mt-2 rounded-lg border border-lime/10 bg-lime/[0.035] p-2 text-[9px] leading-4 text-lime/65">When you press Export MP4, Brayo.ai finishes the render first, then uploads it to each selected connected account.</p>}
       {publishError && <p className="mt-2 text-[10px] leading-4 text-red-300">{publishError}</p>}
     </div>
   </div>;

@@ -3,7 +3,7 @@ import '@/app/globals.css';
 import { AppShell } from '@/components/app-shell';
 
 export const metadata: Metadata = {
-  title: 'ViralCut — AI Video Editor',
+  title: 'Brayo.ai — AI Video Editor',
   description: 'Turn long videos into polished short-form clips, locally.',
 };
 

@@ -433,24 +433,61 @@ export async function signedB2ReadUrl(key: string, downloadFilename?: string) {
 }
 
 export function isB2NotFound(error: unknown) {
-  const candidate = error as { name?: string; $metadata?: { httpStatusCode?: number } };
-  return candidate?.name === 'NoSuchKey' || candidate?.name === 'NotFound' || candidate?.$metadata?.httpStatusCode === 404;
+  const candidate = error as { name?: string; Code?: string; code?: string };
+  const code = candidate?.Code || candidate?.code || candidate?.name;
+  // Only a missing object is an expected empty result. A missing bucket or a
+  // wrong S3 endpoint is also HTTP 404, but must surface as storage
+  // configuration failure instead of impersonating a missing Brayo API route.
+  return code === 'NoSuchKey' || code === 'NotFound';
 }
 
 export function storageErrorDetails(error: unknown, fallback: string) {
-  const candidate = error as { name?: string; Code?: string; message?: string; $metadata?: { httpStatusCode?: number } };
+  const candidate = error as {
+    name?: string;
+    Code?: string;
+    code?: string;
+    message?: string;
+    $metadata?: { httpStatusCode?: number };
+  };
   if (error instanceof StorageConfigurationError) {
     return { error: error.message, code: error.code, retryable: false, status: 503 };
   }
   const status = candidate?.$metadata?.httpStatusCode;
-  const code = candidate?.Code || candidate?.name || 'STORAGE_ERROR';
+  const providerCode = candidate?.Code || candidate?.code || candidate?.name || 'STORAGE_ERROR';
+  if (providerCode === 'NoSuchBucket' || status === 404) {
+    return {
+      error: 'The configured object-storage bucket or endpoint could not be found. Check B2_BUCKET_NAME, B2_ENDPOINT and B2_REGION.',
+      code: providerCode === 'NoSuchBucket' ? 'STORAGE_BUCKET_NOT_FOUND' : 'STORAGE_RESOURCE_NOT_FOUND',
+      retryable: false,
+      status: 503,
+    };
+  }
+  if (status === 401 || status === 403 || ['AccessDenied', 'InvalidAccessKeyId', 'SignatureDoesNotMatch'].includes(providerCode)) {
+    return {
+      error: 'Object storage rejected the configured application key. Check its bucket and file permissions.',
+      code: 'STORAGE_ACCESS_DENIED',
+      retryable: false,
+      status: 503,
+    };
+  }
+  if (['AuthorizationHeaderMalformed', 'PermanentRedirect', 'IncorrectEndpoint', 'InvalidRegion'].includes(providerCode)) {
+    return {
+      error: 'The object-storage endpoint and region do not match the configured bucket.',
+      code: 'STORAGE_ENDPOINT_MISMATCH',
+      retryable: false,
+      status: 503,
+    };
+  }
   const safeMessage = candidate?.message && !/credential|secret|application key/i.test(candidate.message)
     ? candidate.message
     : fallback;
   return {
     error: safeMessage,
-    code,
+    code: providerCode,
     retryable: !status || status === 408 || status === 429 || status >= 500,
-    status: status && status >= 400 && status < 600 ? status : 502,
+    // Storage-provider statuses are not public resource-routing statuses. In
+    // particular, never let an upstream 404 make a reached API handler look
+    // missing to Vercel or the browser.
+    status: status && status >= 500 ? 502 : 503,
   };
 }

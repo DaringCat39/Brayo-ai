@@ -55,7 +55,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
     if (!tokenResponse.ok || !token.access_token) throw new Error(token.error_description || token.error || 'Token exchange failed.');
 
     // Request upload/publish permission only; no profile, email, contacts or
-    // password access is needed for ViralCut to publish finished videos.
+    // password access is needed for Brayo.ai to publish finished videos.
     const label = value === 'youtube' ? 'YouTube channel' : 'TikTok account';
 
     const existingAccount = await getIntegrationAccount(value);

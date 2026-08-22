@@ -89,7 +89,7 @@ export default function HomePage() {
       </section>
 
       <section className="mt-9 pb-8">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between"><div><p className="eyebrow">Connected channels</p><h2 className="mt-1.5 text-lg font-semibold tracking-[-0.03em]">Publish without leaving ViralCut</h2></div><p className="max-w-lg text-[10px] leading-4 text-white/30">Connect securely once. Finished exports can publish automatically to the channels you enable.</p></div>
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between"><div><p className="eyebrow">Connected channels</p><h2 className="mt-1.5 text-lg font-semibold tracking-[-0.03em]">Publish without leaving Brayo.ai</h2></div><p className="max-w-lg text-[10px] leading-4 text-white/30">Connect securely once. Finished exports can publish automatically to the channels you enable.</p></div>
         <ChannelConnections compact />
       </section>
     </div>

@@ -188,6 +188,11 @@ export async function GET() {
     return NextResponse.json({ projects: await listProjects() });
   } catch (error) {
     const detail = storageErrorDetails(error, 'Projects could not be read from object storage.');
+    console.error('[api/projects] Project storage request failed', {
+      code: detail.code,
+      status: detail.status,
+      error: detail.error,
+    });
     return jsonError(detail.error, detail.code, detail.status, detail.retryable);
   }
 }

@@ -1,4 +1,4 @@
-# ViralCut AI
+# Brayo.ai
 
 A local-first short-form video editor built with Next.js, TypeScript, Tailwind CSS, SQLite, FFmpeg, built-in local Whisper and optional OpenAI-compatible analysis.
 
@@ -34,7 +34,7 @@ Uploaded sources, thumbnails, transcripts, project metadata and exports are stor
 
 Copy `.env.example` to `.env.local` and configure only the providers you want.
 
-ViralCut downloads its built-in local Whisper model once on the first analysed video, caches it under `.data/models/`, and performs later transcription on this device. You can choose a different compatible model with:
+Brayo.ai downloads its built-in local Whisper model once on the first analysed video, caches it under `.data/models/`, and performs later transcription on this device. You can choose a different compatible model with:
 
 ```bash
 LOCAL_WHISPER_MODEL=Xenova/whisper-tiny.en
@@ -95,3 +95,11 @@ npm run typecheck
 npm run build
 npm audit --omit=dev
 ```
+
+With a built server running on port 3111, verify the consolidated API dispatcher with:
+
+```bash
+npm run smoke:api
+```
+
+The smoke table requires `/api/projects` and `/api/uploads` to return valid JSON and the expected `x-brayo-api-route` marker from `app/api/[...path]/route.ts`.

@@ -115,7 +115,7 @@ function makeClip(candidate: { start: number; end: number; text?: string } & Par
     title,
     hook,
     alternativeHook: category === 'Story' ? 'Wait for the payoff…' : 'This deserves a closer look…',
-    socialCaption: `${title} — clipped locally with ViralCut.`,
+    socialCaption: `${title} — clipped with Brayo.ai.`,
     youtubeTitle: `${title} #Shorts`,
     hashtags: ['#shorts', '#reels', `#${category.toLowerCase().replace(/\s/g, '')}`],
     reason: candidate.reason || (text ? `A self-contained ${category.toLowerCase()} section with clean pacing and an early hook.` : 'A high-signal section with limited dead air and a clean ending.'),

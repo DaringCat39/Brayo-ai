@@ -44,7 +44,7 @@ export function SettingsView() {
       </section>
 
       <section className="rounded-3xl border border-dashed border-white/10 p-5 sm:p-6 lg:col-span-2">
-        <p className="eyebrow">Private deployment configuration</p><p className="mt-2 text-sm leading-6 text-white/65">Platform connection credentials are configured once on the ViralCut server by the app owner. Creators only press <strong className="font-medium text-white/80">Continue with Google</strong> or <strong className="font-medium text-white/80">Continue with TikTok</strong>, sign in on that platform’s own page, and approve publishing. ViralCut never asks for or stores their account password.</p>
+        <p className="eyebrow">Private deployment configuration</p><p className="mt-2 text-sm leading-6 text-white/65">Platform connection credentials are configured once on the Brayo.ai server by the app owner. Creators only press <strong className="font-medium text-white/80">Continue with Google</strong> or <strong className="font-medium text-white/80">Continue with TikTok</strong>, sign in on that platform’s own page, and approve publishing. Brayo.ai never asks for or stores their account password.</p>
       </section>
     </div>
   );

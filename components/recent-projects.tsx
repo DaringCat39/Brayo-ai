@@ -12,9 +12,16 @@ export function RecentProjects({ limit = 3, showEmpty = true }: { limit?: number
   useEffect(() => {
     let active = true;
     async function load() {
-      const response = await fetch('/api/projects', { cache: 'no-store' });
-      const body = (await response.json()) as { projects: Project[] };
-      if (active) { setProjects(body.projects); setLoading(false); }
+      try {
+        const response = await fetch('/api/projects', { cache: 'no-store' });
+        const body = (await response.json()) as { projects?: Project[]; error?: string };
+        if (!response.ok || !Array.isArray(body.projects)) throw new Error(body.error || 'Projects could not be loaded.');
+        if (active) setProjects(body.projects);
+      } catch (error) {
+        console.error('[Brayo.ai] Recent-project request failed:', error);
+      } finally {
+        if (active) setLoading(false);
+      }
     }
     load();
     const timer = setInterval(load, 5000);

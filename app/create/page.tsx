@@ -17,7 +17,7 @@ const steps = [
 export default function CreatePage() {
   return (
     <div className="mx-auto max-w-6xl px-4 py-9 sm:px-7 lg:px-10 lg:py-12">
-      <PageHeader eyebrow="Auto clip workflow" title="Create a complete clip batch in three steps." description="Upload once, choose your format and let ViralCut find, caption and prepare every strong moment—using the same fast guided workflow as leading creator tools, with your private local pipeline." />
+      <PageHeader eyebrow="Auto clip workflow" title="Create a complete clip batch in three steps." description="Upload once, choose your format and let Brayo.ai find, caption and prepare every strong moment—using the same fast guided workflow as leading creator tools, with your private local pipeline." />
       <div className="mt-7 grid gap-2 sm:grid-cols-3">
         {steps.map(({ number, icon: Icon, title, detail }, index) => (
           <div key={title} className="relative flex items-center gap-3 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-3.5">
