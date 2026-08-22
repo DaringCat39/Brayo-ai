@@ -4,12 +4,14 @@ import { unlink } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import path from 'node:path';
+import type { HeadObjectCommandOutput } from '@aws-sdk/client-s3';
 import { NextRequest, NextResponse } from 'next/server';
 import type { CaptionSettings, CompletedVideoUpload, Project, UploadStorageProvider } from '@/types';
 import {
   b2BucketName,
   b2Configured,
   headB2Object,
+  logB2Diagnostic,
   projectSourceKey,
   storageErrorDetails,
   verifyUploadSession,
@@ -137,14 +139,35 @@ async function registerDirectUpload(request: NextRequest) {
       return jsonError('Invalid video upload metadata.', 'INVALID_UPLOAD_METADATA', 400);
     }
 
-    const stored = await headB2Object(claims.key);
+    let stored: HeadObjectCommandOutput;
+    try {
+      stored = await headB2Object(claims.key);
+    } catch (error) {
+      logB2Diagnostic('project.upload-verification.failed', {
+        projectId: claims.projectId,
+        key: claims.key,
+      }, error);
+      throw error;
+    }
     if (
       stored.ContentLength !== claims.size
       || stored.ETag !== upload.etag
       || (upload.versionId && stored.VersionId !== upload.versionId)
     ) {
+      logB2Diagnostic('project.upload-verification.mismatch', {
+        projectId: claims.projectId,
+        key: claims.key,
+        expectedSize: claims.size,
+        storedSize: stored.ContentLength,
+      });
       return jsonError('The completed upload could not be verified.', 'UPLOAD_VERIFICATION_FAILED', 400, true);
     }
+    logB2Diagnostic('project.upload-verification.completed', {
+      projectId: claims.projectId,
+      key: claims.key,
+      size: stored.ContentLength,
+      requestId: stored.$metadata.requestId,
+    });
 
     // Registration is idempotent: if the small response was lost after the
     // project was created, retrying must not erase analysis already in flight.
@@ -172,6 +195,11 @@ async function registerDirectUpload(request: NextRequest) {
       storageVersionId: stored.VersionId,
       preferredDuration: preferredDuration(body.preferredDuration),
       defaultCaptionPreset: captionPreset(body.captionPreset),
+    });
+    logB2Diagnostic('project.created', {
+      projectId: claims.projectId,
+      key: claims.key,
+      size: claims.size,
     });
     return NextResponse.json({ project }, { status: 201 });
   } catch (error) {

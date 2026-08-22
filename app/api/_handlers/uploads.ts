@@ -7,10 +7,12 @@ import {
   b2BucketName,
   b2Configured,
   completeB2MultipartUpload,
+  configuredAppOrigin,
   createB2MultipartUpload,
   multipartPartSize,
   signB2UploadParts,
   storageErrorDetails,
+  validateB2RuntimeConfiguration,
   verifyUploadSession,
 } from '@/lib/b2';
 import {
@@ -53,7 +55,9 @@ function isSameOrigin(request: NextRequest) {
   const expectedProtocol = request.headers.get('x-forwarded-proto') || request.nextUrl.protocol.replace(':', '');
   try {
     const parsed = new URL(origin);
-    return parsed.host === expectedHost && parsed.protocol === `${expectedProtocol}:`;
+    const requestOrigin = `${expectedProtocol}://${expectedHost}`;
+    const configuredOrigin = configuredAppOrigin(request.nextUrl.origin);
+    return parsed.origin === requestOrigin && (!process.env.VERCEL || parsed.origin === configuredOrigin);
   } catch {
     return false;
   }
@@ -78,6 +82,14 @@ function jsonError(error: string, code: string, status: number, retryable = fals
 
 export async function GET() {
   const configured = b2Configured();
+  if (configured) {
+    try {
+      validateB2RuntimeConfiguration();
+    } catch (error) {
+      const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
+      return jsonError(detail.error, detail.code, detail.status, detail.retryable);
+    }
+  }
   const capabilities: UploadCapabilities = configured
     ? { provider: 'backblaze-b2', direct: true, multipart: true, localFallback: false }
     : { provider: 'local', direct: false, multipart: false, localFallback: !process.env.VERCEL };
@@ -85,6 +97,14 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  if (b2Configured()) {
+    try {
+      validateB2RuntimeConfiguration();
+    } catch (error) {
+      const detail = storageErrorDetails(error, 'Private object storage configuration is invalid.');
+      return jsonError(detail.error, detail.code, detail.status, detail.retryable);
+    }
+  }
   if (!isSameOrigin(request)) {
     return jsonError('Upload authorization must come from this app.', 'UPLOAD_ORIGIN_REJECTED', 403);
   }

@@ -39,6 +39,35 @@ interface ActiveMultipartUpload {
   completedUpload?: CompletedVideoUpload;
 }
 
+type PartFailureCategory =
+  | 'network-or-cors'
+  | 'timeout'
+  | 'cancelled'
+  | 'authorization'
+  | 'client-request'
+  | 'storage-service'
+  | 'missing-etag';
+
+class MultipartPartError extends Error {
+  constructor(
+    message: string,
+    readonly partNumber: number,
+    readonly status: number,
+    readonly category: PartFailureCategory,
+    readonly responseText: string,
+    readonly requestId: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'MultipartPartError';
+  }
+}
+
+const MULTIPART_CONCURRENCY = 4;
+const PART_AUTHORIZATION_BATCH_SIZE = MULTIPART_CONCURRENCY * 2;
+const MAX_PART_ATTEMPTS = 5;
+const PART_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
+
 function uploadFingerprint(file: File) {
   return `${file.name}:${file.size}:${file.lastModified}:${file.type}`;
 }
@@ -61,6 +90,56 @@ function responseErrorMessage(text: string, status: number, fallback: string) {
   return `${fallback} (HTTP ${status || 'network error'}).`;
 }
 
+function safeStorageResponse(text: string) {
+  return text
+    .slice(0, 1_000)
+    .replace(/(X-Amz-(?:Credential|Signature|Security-Token)=)[^&\s<]+/gi, '$1[redacted]');
+}
+
+function partError(
+  partNumber: number,
+  status: number,
+  category: PartFailureCategory,
+  responseText: string,
+  retryable: boolean,
+  requestId = '',
+) {
+  const safeResponse = safeStorageResponse(responseText);
+  const effectiveRequestId = requestId || safeResponse.match(/<RequestId>([^<]+)<\/RequestId>/i)?.[1] || '';
+  const fallback = category === 'network-or-cors'
+    ? 'The browser could not reach or read Backblaze B2. Check the bucket CORS origin and your connection'
+    : category === 'timeout'
+      ? 'The video part upload timed out'
+      : category === 'cancelled'
+        ? 'The video part upload was cancelled'
+        : category === 'missing-etag'
+          ? 'Backblaze B2 uploaded the part but its ETag is not exposed by bucket CORS'
+          : 'Backblaze B2 rejected the video part';
+  const detail = responseErrorMessage(safeResponse, status, fallback);
+  return new MultipartPartError(
+    `Part ${partNumber}: ${detail}${effectiveRequestId ? ` Backblaze request ID: ${effectiveRequestId}.` : ''}`,
+    partNumber,
+    status,
+    category,
+    safeResponse,
+    effectiveRequestId,
+    retryable,
+  );
+}
+
+function logPartFailure(error: MultipartPartError, attempt: number) {
+  // Never log the presigned URL: its query string is a temporary credential.
+  console.error('[Brayo.ai multipart upload part failed]', {
+    partNumber: error.partNumber,
+    attempt,
+    maximumAttempts: MAX_PART_ATTEMPTS,
+    status: error.status || 0,
+    classification: error.category,
+    requestId: error.requestId || '(not exposed)',
+    responseText: error.responseText || '(response unavailable to browser)',
+  });
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const text = await response.text();
@@ -72,28 +151,125 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
 }
 
-function uploadPart(url: string, data: Blob, onProgress: (loaded: number) => void) {
+function uploadPart(part: PresignedUploadPart, data: Blob, onProgress: (loaded: number) => void) {
   return new Promise<string>((resolve, reject) => {
+    if (part.method !== 'PUT') {
+      reject(partError(part.partNumber, 0, 'client-request', '', false));
+      return;
+    }
+    if (part.expiresAt <= Date.now()) {
+      reject(partError(part.partNumber, 403, 'authorization', 'The presigned part URL expired.', true));
+      return;
+    }
     const request = new XMLHttpRequest();
-    request.open('PUT', url);
+    request.open('PUT', part.url);
+    request.timeout = PART_REQUEST_TIMEOUT_MS;
+    request.withCredentials = false;
     request.upload.onprogress = (event) => onProgress(event.loaded);
-    request.onerror = () => reject(new Error('The connection was interrupted while uploading a video part.'));
-    request.onabort = () => reject(new Error('The video part upload was cancelled.'));
+    const requestId = () => request.getResponseHeader('x-amz-request-id') || request.getResponseHeader('x-amz-id-2') || '';
+    request.onerror = () => reject(partError(part.partNumber, request.status, 'network-or-cors', request.responseText || '', true, requestId()));
+    request.ontimeout = () => reject(partError(part.partNumber, request.status, 'timeout', request.responseText || '', true, requestId()));
+    request.onabort = () => reject(partError(part.partNumber, request.status, 'cancelled', request.responseText || '', false, requestId()));
     request.onload = () => {
       if (request.status >= 200 && request.status < 300) {
         const etag = request.getResponseHeader('ETag');
         if (etag) resolve(etag);
-        else reject(new Error('Object storage completed a part without returning its ETag. Check the bucket CORS ExposeHeaders setting.'));
+        else reject(partError(part.partNumber, request.status, 'missing-etag', request.responseText || '', false, requestId()));
         return;
       }
-      reject(new Error(responseErrorMessage(request.responseText, request.status, 'Object storage rejected a video part')));
+      const category: PartFailureCategory = request.status === 401 || request.status === 403
+        ? 'authorization'
+        : request.status >= 500
+          ? 'storage-service'
+          : 'client-request';
+      const retryable = category === 'authorization'
+        || category === 'storage-service'
+        || request.status === 408
+        || request.status === 409
+        || request.status === 425
+        || request.status === 429;
+      reject(partError(part.partNumber, request.status, category, request.responseText || '', retryable, requestId()));
     };
+    // Do not add Content-Type, Authorization, checksum, or custom headers here.
+    // UploadPart is query-presigned and the Blob slices below deliberately have
+    // an empty MIME type, keeping the sent request identical to the signature.
     request.send(data);
   });
 }
 
 function wait(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function partRetryDelay(attempt: number) {
+  return Math.min(8_000, 750 * (2 ** Math.max(0, attempt - 1)));
+}
+
+async function authorizeUploadParts(sessionToken: string, partNumbers: number[]) {
+  let authorization: { parts: PresignedUploadPart[] } | undefined;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      authorization = await requestJson<{ parts: PresignedUploadPart[] }>('/api/uploads/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'sign-parts', sessionToken, partNumbers }),
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await wait(partRetryDelay(attempt));
+    }
+  }
+  if (!authorization) throw lastError instanceof Error ? lastError : new Error('Could not authorize video parts.');
+  const requested = new Set(partNumbers);
+  if (
+    authorization.parts.length !== requested.size
+    || authorization.parts.some((part) => (
+      !requested.has(part.partNumber)
+      || part.method !== 'PUT'
+      || !Number.isSafeInteger(part.expiresAt)
+      || !part.url
+    ))
+  ) {
+    throw new Error('Backblaze B2 returned invalid multipart upload authorization.');
+  }
+  return new Map(authorization.parts.map((part) => [part.partNumber, part]));
+}
+
+async function completeMultipartSession(
+  sessionToken: string,
+  parts: Array<{ partNumber: number; etag: string }>,
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await requestJson<{ upload: CompletedVideoUpload }>('/api/uploads/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'complete', sessionToken, parts }),
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await wait(partRetryDelay(attempt));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Could not complete the multipart upload.');
+}
+
+async function abortMultipartSession(sessionToken: string) {
+  try {
+    await requestJson<{ aborted: boolean }>('/api/uploads/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'abort', sessionToken }),
+      keepalive: true,
+    });
+  } catch (error) {
+    console.error('[Brayo.ai multipart upload abort failed]', {
+      message: error instanceof Error ? error.message : 'Unknown abort error',
+    });
+  }
 }
 
 async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>) {
@@ -121,6 +297,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState(0);
   const [uploadSpeed, setUploadSpeed] = useState(0);
+  const [remainingBytes, setRemainingBytes] = useState(0);
   const [uploadStage, setUploadStage] = useState('Ready to upload');
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
@@ -152,23 +329,21 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
     }
     const previous = activeUpload.current;
     if (previous && !previous.completedUpload) {
-      void fetch('/api/uploads/token', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'abort', sessionToken: previous.session.sessionToken }),
-        keepalive: true,
-      });
+      void abortMultipartSession(previous.session.sessionToken);
     }
     activeUpload.current = null;
     setError('');
     setProgress(0);
+    setRemainingBytes(next.size);
     setFile(next);
   }
 
   function reportProgress(loaded: number, total: number, percentage?: number) {
     const elapsedSeconds = Math.max(0.05, (performance.now() - uploadStartedAt.current) / 1000);
-    setProgress(Math.max(0, Math.min(100, Math.round(percentage ?? (loaded / Math.max(1, total)) * 100))));
-    setUploadSpeed(Math.max(0, loaded - speedBaseBytes.current) / elapsedSeconds);
+    const safeLoaded = Math.max(0, Math.min(total, loaded));
+    setProgress(Math.max(0, Math.min(100, Math.round(percentage ?? (safeLoaded / Math.max(1, total)) * 100))));
+    setUploadSpeed(Math.max(0, safeLoaded - speedBaseBytes.current) / elapsedSeconds);
+    setRemainingBytes(Math.max(0, total - safeLoaded));
   }
 
   async function getCapabilities() {
@@ -238,57 +413,63 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
       const pending = Array.from({ length: session.partCount }, (_, index) => index + 1)
         .filter((partNumber) => !active!.completedParts.has(partNumber));
       const inFlight = new Map<number, number>();
-      const concurrency = 4;
-      const authorizationBatchSize = concurrency * 2;
 
-      for (let offset = 0; offset < pending.length; offset += authorizationBatchSize) {
-        const batch = pending.slice(offset, offset + authorizationBatchSize);
-        setUploadStage(`Uploading parts ${offset + 1}–${Math.min(offset + batch.length, pending.length)} of ${pending.length}`);
-        const authorization = await requestJson<{ parts: PresignedUploadPart[] }>('/api/uploads/token', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ action: 'sign-parts', sessionToken: session.sessionToken, partNumbers: batch }),
-        });
-        const urls = new Map(authorization.parts.map((part) => [part.partNumber, part.url]));
-        await mapWithConcurrency(batch, concurrency, async (partNumber) => {
-          const start = (partNumber - 1) * session.partSize;
-          const end = Math.min(video.size, start + session.partSize);
-          const url = urls.get(partNumber);
-          if (!url) throw new Error(`Upload authorization for part ${partNumber} is missing.`);
-          let lastError: unknown;
-          for (let attempt = 0; attempt < 3; attempt += 1) {
-            try {
-              inFlight.set(partNumber, 0);
-              const etag = await uploadPart(url, video.slice(start, end), (loaded) => {
-                inFlight.set(partNumber, loaded);
-                const totalLoaded = completedBytes() + [...inFlight.values()].reduce((sum, value) => sum + value, 0);
-                reportProgress(totalLoaded, video.size);
-              });
-              active!.completedParts.set(partNumber, etag);
-              inFlight.delete(partNumber);
-              reportProgress(completedBytes() + [...inFlight.values()].reduce((sum, value) => sum + value, 0), video.size);
-              return;
-            } catch (partError) {
-              lastError = partError;
-              inFlight.delete(partNumber);
-              if (attempt < 2) await wait(500 * (2 ** attempt));
+      try {
+        for (let offset = 0; offset < pending.length; offset += PART_AUTHORIZATION_BATCH_SIZE) {
+          const batch = pending.slice(offset, offset + PART_AUTHORIZATION_BATCH_SIZE);
+          setUploadStage(`Uploading parts ${offset + 1}–${Math.min(offset + batch.length, pending.length)} of ${pending.length}`);
+          const initialAuthorizations = await authorizeUploadParts(session.sessionToken, batch);
+          await mapWithConcurrency(batch, MULTIPART_CONCURRENCY, async (partNumber) => {
+            const start = (partNumber - 1) * session.partSize;
+            const end = Math.min(video.size, start + session.partSize);
+            let authorization = initialAuthorizations.get(partNumber);
+            if (!authorization) throw new Error(`Upload authorization for part ${partNumber} is missing.`);
+            let lastError: unknown;
+
+            for (let attempt = 1; attempt <= MAX_PART_ATTEMPTS; attempt += 1) {
+              if (attempt > 1 || authorization.expiresAt - Date.now() < 30_000) {
+                const refreshed = await authorizeUploadParts(session.sessionToken, [partNumber]);
+                authorization = refreshed.get(partNumber);
+                if (!authorization) throw new Error(`Refreshed upload authorization for part ${partNumber} is missing.`);
+              }
+              try {
+                inFlight.set(partNumber, 0);
+                const etag = await uploadPart(authorization, video.slice(start, end, ''), (loaded) => {
+                  inFlight.set(partNumber, loaded);
+                  const totalLoaded = completedBytes() + [...inFlight.values()].reduce((sum, value) => sum + value, 0);
+                  reportProgress(totalLoaded, video.size);
+                });
+                active!.completedParts.set(partNumber, etag);
+                inFlight.delete(partNumber);
+                reportProgress(completedBytes() + [...inFlight.values()].reduce((sum, value) => sum + value, 0), video.size);
+                return;
+              } catch (uploadError) {
+                lastError = uploadError;
+                inFlight.delete(partNumber);
+                const diagnosed = uploadError instanceof MultipartPartError ? uploadError : undefined;
+                if (diagnosed) logPartFailure(diagnosed, attempt);
+                if (attempt >= MAX_PART_ATTEMPTS || (diagnosed && !diagnosed.retryable)) break;
+                setUploadStage(`Retrying part ${partNumber} of ${session.partCount}`);
+                await wait(partRetryDelay(attempt));
+              }
             }
-          }
-          throw lastError instanceof Error ? lastError : new Error(`Video part ${partNumber} failed after three attempts.`);
-        });
-      }
+            throw lastError instanceof Error
+              ? lastError
+              : new Error(`Video part ${partNumber} failed after ${MAX_PART_ATTEMPTS} attempts.`);
+          });
+        }
 
-      setUploadStage('Verifying completed upload');
-      const completed = await requestJson<{ upload: CompletedVideoUpload }>('/api/uploads/token', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          action: 'complete',
-          sessionToken: session.sessionToken,
-          parts: [...active.completedParts.entries()].map(([partNumber, etag]) => ({ partNumber, etag })),
-        }),
-      });
-      active.completedUpload = completed.upload;
+        setUploadStage('Verifying completed upload');
+        const completed = await completeMultipartSession(
+          session.sessionToken,
+          [...active.completedParts.entries()].map(([partNumber, etag]) => ({ partNumber, etag })),
+        );
+        active.completedUpload = completed.upload;
+      } catch (uploadError) {
+        activeUpload.current = null;
+        await abortMultipartSession(session.sessionToken);
+        throw uploadError;
+      }
     }
 
     setProgress(100);
@@ -321,6 +502,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
       : 0;
     setProgress(Math.round((resumedBytes / Math.max(1, file.size)) * 100));
     setUploadSpeed(0);
+    setRemainingBytes(Math.max(0, file.size - resumedBytes));
     speedBaseBytes.current = resumedBytes;
     uploadStartedAt.current = performance.now();
     try {
@@ -331,6 +513,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
       setUploadStage(storage.direct ? 'Uploading directly to storage' : 'Uploading to local server');
       const project = storage.direct ? await registerDirectUpload(file) : await registerLocalUpload(file);
       setProgress(100);
+      setRemainingBytes(0);
       setUploadStage('Preparing analysis');
       router.push(`/projects/${project.id}`);
     } catch (uploadError) {
@@ -343,17 +526,13 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
   function removeVideo() {
     const active = activeUpload.current;
     if (active && !active.completedUpload) {
-      void fetch('/api/uploads/token', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'abort', sessionToken: active.session.sessionToken }),
-        keepalive: true,
-      });
+      void abortMultipartSession(active.session.sessionToken);
     }
     activeUpload.current = null;
     setFile(null);
     setProgress(0);
     setUploadSpeed(0);
+    setRemainingBytes(0);
     setError('');
   }
 
@@ -380,7 +559,7 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
               <div className="mt-3">
                 <div className="mb-1.5 flex justify-between gap-3 text-[10px] font-medium uppercase tracking-wider text-white/38">
                   <span className="truncate">{uploadStage}</span>
-                  <span className="shrink-0">{progress}%{uploadSpeed > 0 ? ` · ${formatBytes(uploadSpeed)}/s` : ''}</span>
+                  <span className="shrink-0">{progress}%{uploadSpeed > 0 ? ` · ${formatBytes(uploadSpeed)}/s` : ''}{remainingBytes > 0 ? ` · ${formatBytes(remainingBytes)} left` : ''}</span>
                 </div>
                 <div className="relative h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
                   <div className="h-full rounded-full bg-gradient-to-r from-violet to-lime transition-all duration-300" style={{ width: `${progress}%` }} />

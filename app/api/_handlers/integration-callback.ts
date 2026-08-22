@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getIntegrationAccount, saveIntegrationAccount } from '@/lib/persistence';
 import { integrationConfig } from '@/lib/integrations';
+import { configuredAppOrigin } from '@/lib/b2';
 import type { PublishingProvider } from '@/types';
 
 function isProvider(value: string): value is PublishingProvider {
@@ -26,7 +27,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
 
   try {
     const config = integrationConfig(value);
-    const callback = new URL(`/api/integrations/${value}/callback`, process.env.APP_URL || request.nextUrl.origin).toString();
+    const callback = new URL(`/api/integrations/${value}/callback`, configuredAppOrigin(request.nextUrl.origin)).toString();
     const form = new URLSearchParams();
     if (value === 'youtube') {
       form.set('client_id', config.clientId);

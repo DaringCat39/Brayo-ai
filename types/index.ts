@@ -33,6 +33,8 @@ export interface MultipartUploadSession {
 export interface PresignedUploadPart {
   partNumber: number;
   url: string;
+  method: 'PUT';
+  expiresAt: number;
 }
 
 export interface CompletedVideoUpload {

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { integrationConfig } from '@/lib/integrations';
+import { configuredAppOrigin } from '@/lib/b2';
 import type { PublishingProvider } from '@/types';
 
 function isProvider(value: string): value is PublishingProvider {
@@ -16,7 +17,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
   }
 
   const state = randomBytes(24).toString('hex');
-  const callback = new URL(`/api/integrations/${value}/callback`, process.env.APP_URL || request.nextUrl.origin).toString();
+  const callback = new URL(`/api/integrations/${value}/callback`, configuredAppOrigin(request.nextUrl.origin)).toString();
   const destination = value === 'youtube'
     ? new URL('https://accounts.google.com/o/oauth2/v2/auth')
     : new URL('https://www.tiktok.com/v2/auth/authorize/');

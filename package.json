@@ -8,6 +8,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "smoke:api": "node scripts/smoke-api-routing.mjs",
+    "smoke:b2-multipart": "node scripts/smoke-b2-multipart.mjs",
     "storage:cors": "node scripts/configure-b2-cors.mjs"
   },
   "dependencies": {

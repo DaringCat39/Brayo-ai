@@ -70,13 +70,27 @@ Without that opt-in, local Whisper remains first and long videos are still split
 
 Production uses the Node.js runtime, direct private Backblaze B2 multipart uploads, and Vercel Workflow. The browser uploads four parts concurrently with individual retries, then sends only the verified object key and metadata to Brayo. Durable steps prepare the source, transcribe overlapping chunks, analyse scenes, select clips, generate previews, and render selected clips. Project metadata, audio chunks, transcript checkpoints, scene results, thumbnails, music, and renders persist in the private B2 bucket, while FFmpeg scratch files use `/tmp` only.
 
-Set `B2_ENDPOINT`, `B2_REGION`, `B2_BUCKET_NAME`, `B2_APPLICATION_KEY_ID`, and `B2_APPLICATION_KEY` in Vercel. Keep the bucket private. With `APP_URL` set to the production HTTPS origin, apply the required browser-upload CORS policy once:
+Set `B2_ENDPOINT`, `B2_REGION`, `B2_BUCKET_NAME`, `B2_APPLICATION_KEY_ID`, and `B2_APPLICATION_KEY` in Vercel. Keep the bucket private. `APP_URL` must be the exact production HTTPS origin without a trailing slash. With it set, apply the required browser-upload CORS policy once:
 
 ```bash
 npm run storage:cors
 ```
 
-`PutBucketCors` needs an unrestricted one-time Backblaze application key with `writeBuckets`; run this command locally with that temporary key and never add it to Vercel. Then use a bucket-restricted runtime key with `listAllBucketNames`, `listFiles`, `readFiles`, `writeFiles`, and `deleteFiles` in Vercel. The applied rule permits `GET`, `HEAD`, and `PUT` only from `APP_URL`, `http://localhost:3000`, and `http://localhost:3111`, allows request headers needed by presigned and ranged requests, and exposes `ETag` so multipart completion can be verified. You can instead pass one or more production origins explicitly: `npm run storage:cors -- https://brayo.example.com`.
+`PutBucketCors` needs an unrestricted one-time Backblaze application key with `writeBuckets` (and `readBuckets` for verification); run this command locally with that temporary key and never add it to Vercel. The script reads the rule back after applying it and fails if browser `PUT` or exposed `ETag` support is missing. Then use a bucket-restricted runtime key with `listAllBucketNames`, `listFiles`, `readFiles`, `writeFiles`, and `deleteFiles` in Vercel. The applied rule permits `GET`, `HEAD`, and `PUT` only from `APP_URL`, `http://localhost:3000`, and `http://localhost:3111`, allows request headers needed by presigned and ranged requests, and exposes `ETag` so multipart completion can be verified. You can instead pass one or more production origins explicitly: `npm run storage:cors -- https://brayo.example.com`.
+
+The resulting S3 CORS configuration is:
+
+```json
+{
+  "CORSRules": [{
+    "AllowedOrigins": ["https://brayo-ai-tta2.vercel.app", "http://localhost:3000", "http://localhost:3111"],
+    "AllowedMethods": ["GET", "HEAD", "PUT"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag", "x-amz-version-id", "x-amz-request-id", "x-amz-id-2"],
+    "MaxAgeSeconds": 86400
+  }]
+}
+```
 
 Brayo retains one project. After a new upload is verified and its metadata is saved, all previous project sources, clips, intermediates, metadata versions, delete markers, and unfinished multipart uploads are permanently removed from B2. The current project prefix is always excluded from that cleanup.
 
@@ -103,3 +117,9 @@ npm run smoke:api
 ```
 
 The smoke table requires `/api/projects` and `/api/uploads` to return valid JSON and the expected `x-brayo-api-route` marker from `app/api/[...path]/route.ts`.
+
+With the app running against B2, the following checks the bucket and credentials, reads CORS when permitted, verifies the functional browser preflight, creates and completes a 5 MiB multipart upload, verifies the stored object, then permanently removes every test-object version:
+
+```bash
+BRAYO_SMOKE_BASE_URL=http://localhost:3111 npm run smoke:b2-multipart
+```

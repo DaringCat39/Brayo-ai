@@ -15,6 +15,8 @@ import {
   S3Client,
   UploadPartCommand,
   type CompletedPart,
+  type CreateMultipartUploadCommandOutput,
+  type HeadObjectCommandOutput,
   type ObjectIdentifier,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -26,6 +28,8 @@ const REQUIRED_B2_ENV = [
   'B2_APPLICATION_KEY_ID',
   'B2_APPLICATION_KEY',
 ] as const;
+
+const PRESIGNED_UPLOAD_PART_TTL_SECONDS = 15 * 60;
 
 export const B2_PROJECT_PREFIX = 'brayo/projects/';
 export const B2_PROJECT_METADATA_PREFIX = 'brayo/metadata/projects/';
@@ -46,6 +50,17 @@ interface B2Config {
   bucket: string;
   accessKeyId: string;
   secretAccessKey: string;
+}
+
+interface B2ErrorMetadata {
+  name?: string;
+  Code?: string;
+  code?: string;
+  $metadata?: {
+    httpStatusCode?: number;
+    requestId?: string;
+    extendedRequestId?: string;
+  };
 }
 
 export interface UploadSessionClaims {
@@ -71,18 +86,82 @@ function readB2Config(): B2Config {
   if (missing.length) {
     throw new StorageConfigurationError(`Missing Backblaze B2 configuration: ${missing.join(', ')}.`);
   }
-  const rawEndpoint = process.env.B2_ENDPOINT!.trim().replace(/\/$/, '');
+  const rawEndpoint = process.env.B2_ENDPOINT!.trim().replace(/\/+$/, '');
   const endpoint = /^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
-  if (process.env.VERCEL && !endpoint.startsWith('https://')) {
+  let parsedEndpoint: URL;
+  try {
+    parsedEndpoint = new URL(endpoint);
+  } catch {
+    throw new StorageConfigurationError('B2_ENDPOINT must be a valid Backblaze S3 endpoint URL.');
+  }
+  if (process.env.VERCEL && parsedEndpoint.protocol !== 'https:') {
     throw new StorageConfigurationError('B2_ENDPOINT must use HTTPS in production.');
+  }
+  const region = process.env.B2_REGION!.trim();
+  const expectedHostname = `s3.${region}.backblazeb2.com`;
+  if (
+    parsedEndpoint.hostname.toLowerCase() !== expectedHostname.toLowerCase()
+    || (parsedEndpoint.pathname !== '/' && parsedEndpoint.pathname !== '')
+    || parsedEndpoint.search
+    || parsedEndpoint.hash
+  ) {
+    throw new StorageConfigurationError(`B2_ENDPOINT must be https://${expectedHostname} without a bucket name or path.`);
   }
   return {
     endpoint,
-    region: process.env.B2_REGION!.trim(),
+    region,
     bucket: process.env.B2_BUCKET_NAME!.trim(),
     accessKeyId: process.env.B2_APPLICATION_KEY_ID!.trim(),
     secretAccessKey: process.env.B2_APPLICATION_KEY!.trim(),
   };
+}
+
+export function configuredAppOrigin(fallback?: string) {
+  const configured = process.env.APP_URL?.trim();
+  const value = configured || fallback?.trim();
+  if (!value) throw new StorageConfigurationError('Missing APP_URL. Set it to the exact Brayo.ai origin.');
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new StorageConfigurationError('APP_URL must be a valid web origin such as https://brayo.example.com.');
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol)
+    || parsed.username
+    || parsed.password
+    || value !== parsed.origin
+    || (process.env.VERCEL && parsed.protocol !== 'https:')
+  ) {
+    throw new StorageConfigurationError('APP_URL must be one HTTPS origin with no path, query, fragment or trailing slash.');
+  }
+  return parsed.origin;
+}
+
+export function validateB2RuntimeConfiguration() {
+  const config = readB2Config();
+  const appOrigin = configuredAppOrigin();
+  return { endpointOrigin: new URL(config.endpoint).origin, bucket: config.bucket, region: config.region, appOrigin };
+}
+
+export function logB2Diagnostic(
+  event: string,
+  context: Record<string, string | number | boolean | number[] | undefined>,
+  error?: unknown,
+) {
+  const candidate = error as B2ErrorMetadata | undefined;
+  const entry = {
+    event,
+    ...context,
+    ...(error ? {
+      providerCode: candidate?.Code || candidate?.code || candidate?.name || 'STORAGE_ERROR',
+      httpStatus: candidate?.$metadata?.httpStatusCode,
+      requestId: candidate?.$metadata?.requestId,
+      extendedRequestId: candidate?.$metadata?.extendedRequestId,
+    } : {}),
+  };
+  if (error) console.error('[Brayo.ai B2]', entry);
+  else console.info('[Brayo.ai B2]', entry);
 }
 
 export function b2Configured() {
@@ -201,13 +280,26 @@ export async function createB2MultipartUpload(options: {
 }) {
   const projectId = options.projectId || randomUUID();
   const key = projectSourceKey(projectId, options.extension);
-  const result = await b2Client().send(new CreateMultipartUploadCommand({
-    Bucket: b2BucketName(),
-    Key: key,
-    ContentType: options.contentType,
-    Metadata: { projectId },
-  }));
+  logB2Diagnostic('multipart.create.started', { projectId, key, size: options.size });
+  let result: CreateMultipartUploadCommandOutput;
+  try {
+    result = await b2Client().send(new CreateMultipartUploadCommand({
+      Bucket: b2BucketName(),
+      Key: key,
+      ContentType: options.contentType,
+      Metadata: { projectId },
+    }));
+  } catch (error) {
+    logB2Diagnostic('multipart.create.failed', { projectId, key, size: options.size }, error);
+    throw error;
+  }
   if (!result.UploadId) throw new Error('Object storage did not create a multipart upload session.');
+  logB2Diagnostic('multipart.create.completed', {
+    projectId,
+    key,
+    size: options.size,
+    requestId: result.$metadata.requestId,
+  });
   const claims: UploadSessionClaims = {
     version: 1,
     projectId,
@@ -231,15 +323,59 @@ export async function signB2UploadParts(claims: UploadSessionClaims, partNumbers
     throw new Error('Invalid multipart part request.');
   }
   const client = b2Client();
-  return Promise.all(partNumbers.map(async (partNumber) => ({
-    partNumber,
-    url: await getSignedUrl(client, new UploadPartCommand({
-      Bucket: b2BucketName(),
-      Key: claims.key,
-      UploadId: claims.uploadId,
-      PartNumber: partNumber,
-    }), { expiresIn: 60 * 60 }),
-  })));
+  const expiresAt = Date.now() + PRESIGNED_UPLOAD_PART_TTL_SECONDS * 1000;
+  try {
+    const parts = await Promise.all(partNumbers.map(async (partNumber) => {
+      const url = await getSignedUrl(client, new UploadPartCommand({
+        Bucket: b2BucketName(),
+        Key: claims.key,
+        UploadId: claims.uploadId,
+        PartNumber: partNumber,
+      }), { expiresIn: PRESIGNED_UPLOAD_PART_TTL_SECONDS });
+      assertPresignedUploadPartTarget(url, claims, partNumber);
+      return { partNumber, url, method: 'PUT' as const, expiresAt };
+    }));
+    logB2Diagnostic('multipart.parts-presigned', {
+      projectId: claims.projectId,
+      key: claims.key,
+      partNumbers,
+      expiresInSeconds: PRESIGNED_UPLOAD_PART_TTL_SECONDS,
+    });
+    return parts;
+  } catch (error) {
+    logB2Diagnostic('multipart.presign.failed', {
+      projectId: claims.projectId,
+      key: claims.key,
+      partNumbers,
+    }, error);
+    throw error;
+  }
+}
+
+function assertPresignedUploadPartTarget(url: string, claims: UploadSessionClaims, partNumber: number) {
+  const target = new URL(url);
+  const config = readB2Config();
+  const endpoint = new URL(config.endpoint);
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(target.pathname);
+  } catch {
+    throw new Error('Object storage generated an invalid upload URL path.');
+  }
+  if (
+    target.protocol !== 'https:'
+    || target.host !== endpoint.host
+    || decodedPath !== `/${config.bucket}/${claims.key}`
+    || target.searchParams.get('uploadId') !== claims.uploadId
+    || target.searchParams.get('partNumber') !== String(partNumber)
+    || target.searchParams.get('X-Amz-Algorithm') !== 'AWS4-HMAC-SHA256'
+    || !target.searchParams.has('X-Amz-Signature')
+    || target.searchParams.get('X-Amz-Expires') !== String(PRESIGNED_UPLOAD_PART_TTL_SECONDS)
+    || target.searchParams.get('X-Amz-SignedHeaders') !== 'host'
+    || !target.searchParams.get('X-Amz-Credential')?.includes(`/${config.region}/s3/aws4_request`)
+  ) {
+    throw new Error('Object storage generated an upload URL for the wrong endpoint, bucket, key, upload ID or part.');
+  }
 }
 
 export async function completeB2MultipartUpload(claims: UploadSessionClaims, parts: CompletedPart[]) {
@@ -251,37 +387,84 @@ export async function completeB2MultipartUpload(claims: UploadSessionClaims, par
   ) {
     throw new Error('The multipart upload is incomplete. Retry the missing parts.');
   }
+  logB2Diagnostic('multipart.complete.started', {
+    projectId: claims.projectId,
+    key: claims.key,
+    partCount: ordered.length,
+  });
   try {
-    await b2Client().send(new CompleteMultipartUploadCommand({
+    const completed = await b2Client().send(new CompleteMultipartUploadCommand({
       Bucket: b2BucketName(),
       Key: claims.key,
       UploadId: claims.uploadId,
       MultipartUpload: { Parts: ordered },
     }));
+    logB2Diagnostic('multipart.complete.committed', {
+      projectId: claims.projectId,
+      key: claims.key,
+      partCount: ordered.length,
+      requestId: completed.$metadata.requestId,
+    });
   } catch (error) {
     // A browser can lose the small completion response after B2 has already
     // committed the object. Treat that retry as idempotent when the exact-size
     // object now exists at this upload's unique project key.
     const name = (error as { name?: string }).name;
-    if (name !== 'NoSuchUpload') throw error;
+    if (name !== 'NoSuchUpload') {
+      logB2Diagnostic('multipart.complete.failed', {
+        projectId: claims.projectId,
+        key: claims.key,
+        partCount: ordered.length,
+      }, error);
+      throw error;
+    }
+    logB2Diagnostic('multipart.complete.retry-verification', {
+      projectId: claims.projectId,
+      key: claims.key,
+      partCount: ordered.length,
+    });
   }
-  const stored = await headB2Object(claims.key);
+  let stored: HeadObjectCommandOutput;
+  try {
+    stored = await headB2Object(claims.key);
+  } catch (error) {
+    logB2Diagnostic('multipart.verify.failed', { projectId: claims.projectId, key: claims.key }, error);
+    throw error;
+  }
   if (stored.ContentLength !== claims.size) {
     throw new Error(`Object storage saved ${stored.ContentLength || 0} of ${claims.size} bytes.`);
   }
+  logB2Diagnostic('multipart.verify.completed', {
+    projectId: claims.projectId,
+    key: claims.key,
+    size: stored.ContentLength,
+    requestId: stored.$metadata.requestId,
+  });
   return stored;
 }
 
 export async function abortB2MultipartUpload(claims: UploadSessionClaims) {
-  await b2Client().send(new AbortMultipartUploadCommand({
-    Bucket: b2BucketName(),
-    Key: claims.key,
-    UploadId: claims.uploadId,
-  }));
+  try {
+    const aborted = await b2Client().send(new AbortMultipartUploadCommand({
+      Bucket: b2BucketName(),
+      Key: claims.key,
+      UploadId: claims.uploadId,
+    }));
+    logB2Diagnostic('multipart.abort.completed', {
+      projectId: claims.projectId,
+      key: claims.key,
+      requestId: aborted.$metadata.requestId,
+    });
+  } catch (error) {
+    if ((error as { name?: string }).name !== 'NoSuchUpload') {
+      logB2Diagnostic('multipart.abort.failed', { projectId: claims.projectId, key: claims.key }, error);
+      throw error;
+    }
+  }
 }
 
 export function multipartPartSize(size: number) {
-  const minimum = 16 * 1024 * 1024;
+  const minimum = 32 * 1024 * 1024;
   const required = Math.ceil(size / 9_999);
   const mebibyte = 1024 * 1024;
   return Math.max(minimum, Math.ceil(required / mebibyte) * mebibyte);
