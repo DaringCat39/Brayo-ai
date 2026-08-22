@@ -24,6 +24,7 @@ const REQUIRED_B2_ENV = [
   'B2_REGION',
   'B2_BUCKET_NAME',
   'B2_APPLICATION_KEY_ID',
+  'B2_APPLICATION_KEY',
 ] as const;
 
 export const B2_PROJECT_PREFIX = 'brayo/projects/';
