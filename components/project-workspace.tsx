@@ -35,11 +35,31 @@ import {
   Zap,
 } from 'lucide-react';
 import type { AspectRatio, AutoPublishSettings, Clip, ClipCategory, EditStyle, FramingMode, IntegrationStatus, Project, PublishingProvider } from '@/types';
-import { formatBytes, formatDuration } from '@/lib/utils';
+import { formatBytes, formatDuration, safeFilename } from '@/lib/utils';
 import { StatusPill } from '@/components/status-pill';
 import { effectiveClipDuration, MIN_CLIP_SECONDS, requiredClipDuration } from '@/lib/clip-duration';
 
 const categories: Array<'All' | ClipCategory> = ['All', 'Funny', 'Emotional', 'Informative', 'Controversial', 'Story', 'Quote', 'High energy'];
+
+async function apiErrorMessage(response: Response, fallback: string): Promise<string> {
+  const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
+  return body.error || body.message || `${fallback} (HTTP ${response.status}).`;
+}
+
+function clipDownloadFilename(clip: Clip): string {
+  const base = safeFilename(`Brayo-${clip.title}`).replace(/\.[^.]+$/, '').slice(0, 120) || 'Brayo-export';
+  return `${base}.mp4`;
+}
+
+function startBrowserDownload(url: string, filename: string): void {
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = 'noopener';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
 
 function ScoreRing({ score, size = 'large' }: { score: number; size?: 'small' | 'large' }) {
   const radius = size === 'large' ? 25 : 17;
@@ -116,16 +136,25 @@ function RankingView({ project, onEdit, reload }: { project: Project; onEdit: (i
   const [category, setCategory] = useState<'All' | ClipCategory>('All');
   const [selected, setSelected] = useState<string[]>([]);
   const [batching, setBatching] = useState(false);
+  const [batchError, setBatchError] = useState('');
   const clips = useMemo(() => {
     const filtered = project.clips.filter((clip) => category === 'All' || clip.category === category);
     return [...filtered].sort((a, b) => sort === 'viral' ? b.scores.viral - a.scores.viral : sort === 'hook' ? b.scores.hook - a.scores.hook : sort === 'duration' ? a.duration - b.duration : a.start - b.start);
   }, [project.clips, category, sort]);
-  async function renderBatch() {
+  async function renderBatch(): Promise<void> {
     if (!selected.length) return;
     setBatching(true);
-    await fetch(`/api/projects/${project.id}/render-batch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clipIds: selected }) });
-    setTimeout(reload, 250);
-    setBatching(false);
+    setBatchError('');
+    try {
+      const response = await fetch(`/api/projects/${project.id}/render-batch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clipIds: selected }) });
+      if (!response.ok) throw new Error(await apiErrorMessage(response, 'The selected MP4 exports could not be started'));
+      setSelected([]);
+      await Promise.resolve(reload());
+    } catch (error) {
+      setBatchError(error instanceof Error ? error.message : 'The selected MP4 exports could not be started.');
+    } finally {
+      setBatching(false);
+    }
   }
   return (
     <div className="px-4 py-7 sm:px-7 lg:px-9 lg:py-8">
@@ -141,6 +170,7 @@ function RankingView({ project, onEdit, reload }: { project: Project; onEdit: (i
             <button onClick={() => onEdit(project.clips[0]?.id)} className="button-secondary"><Scissors className="h-4 w-4" /> Open editor</button>
           </div>
         </div>
+        {batchError && <p className="mt-4 rounded-xl border border-red-400/15 bg-red-400/[0.05] px-3 py-2 text-xs text-red-300">{batchError}</p>}
 
         <div className="mt-7 flex flex-col gap-3 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-3 md:flex-row md:items-center md:justify-between">
           <div className="flex gap-1 overflow-x-auto">
@@ -174,7 +204,12 @@ function RankingView({ project, onEdit, reload }: { project: Project; onEdit: (i
                   <div className="mt-4 grid grid-cols-3 gap-2 border-t border-white/[0.06] pt-3">
                     {[['Hook', clip.scores.hook], ['Retention', clip.scores.retention], ['Emotion', clip.scores.emotion]].map(([label, value]) => <div key={String(label)}><p className="text-[9px] uppercase tracking-wider text-white/25">{label}</p><p className="mt-1 text-xs font-semibold text-white/65">{Math.round(Number(value))}</p></div>)}
                   </div>
-                  <button onClick={() => onEdit(clip.id)} className="button-secondary mt-4 w-full !py-2"><Scissors className="h-3.5 w-3.5" /> Edit clip</button>
+                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                    <button onClick={() => onEdit(clip.id)} className="button-secondary w-full !py-2"><Scissors className="h-3.5 w-3.5" /> Edit clip</button>
+                    {clip.status === 'complete' && clip.outputUrl
+                      ? <button onClick={() => startBrowserDownload(clip.outputUrl!, clipDownloadFilename(clip))} className="button-primary w-full !py-2"><Download className="h-3.5 w-3.5" /> Download MP4</button>
+                      : <button onClick={() => { setSelected((current) => current.includes(clip.id) ? current : [...current, clip.id]); }} className="button-secondary w-full !py-2"><Download className="h-3.5 w-3.5" /> Select export</button>}
+                  </div>
                 </div>
               </article>
             );
@@ -240,11 +275,13 @@ function EditorView({ project, clipId, onDiscover, onChange, reload }: { project
   const videoRef = useRef<HTMLVideoElement>(null);
   const musicRef = useRef<HTMLAudioElement>(null);
   const musicPlayPending = useRef(false);
+  const downloadAfterRender = useRef(false);
   const [draft, setDraft] = useState<Clip>(clip);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(clip.start);
   const [saving, setSaving] = useState(false);
   const [rendering, setRendering] = useState(false);
+  const [exportError, setExportError] = useState('');
   const [panel, setPanel] = useState<'edit' | 'captions' | 'publish'>('edit');
   const captionCues = draft.captionSegments?.length
     ? draft.captionSegments
@@ -290,6 +327,13 @@ function EditorView({ project, clipId, onDiscover, onChange, reload }: { project
     setDraft(clip);
     setPlayhead(clip.start);
     if (clip.status !== 'rendering') setRendering(false);
+    if (clip.status === 'complete' && clip.outputUrl && downloadAfterRender.current) {
+      downloadAfterRender.current = false;
+      startBrowserDownload(clip.outputUrl, clipDownloadFilename(clip));
+    } else if (clip.status === 'failed' && downloadAfterRender.current) {
+      downloadAfterRender.current = false;
+      setExportError(project.job.error || project.job.detail || 'The MP4 export failed.');
+    }
     if (videoRef.current) videoRef.current.currentTime = clip.start;
     musicRef.current?.pause();
   }, [clip]);
@@ -319,11 +363,15 @@ function EditorView({ project, clipId, onDiscover, onChange, reload }: { project
     };
   }, [playing, draft.end, syncMusic]);
   const updateDraft = <K extends keyof Clip>(key: K, value: Clip[K]) => setDraft((current) => ({ ...current, [key]: value }));
-  async function save(nextDraft = draft) {
+  async function save(nextDraft = draft): Promise<Response> {
     setSaving(true);
-    const response = await fetch(`/api/projects/${project.id}/clips/${clip.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(nextDraft) });
-    setSaving(false);
-    if (response.ok) await Promise.resolve(reload());
+    try {
+      const response = await fetch(`/api/projects/${project.id}/clips/${clip.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(nextDraft) });
+      if (response.ok) await Promise.resolve(reload());
+      return response;
+    } finally {
+      setSaving(false);
+    }
   }
   const activeCaption = captionCues.reduce<(typeof captionCues)[number] | undefined>((active, segment) => (
     playhead >= segment.start && playhead < segment.end && (!active || segment.start >= active.start) ? segment : active
@@ -333,11 +381,21 @@ function EditorView({ project, clipId, onDiscover, onChange, reload }: { project
     if (videoRef.current) videoRef.current.currentTime = time;
     syncMusic(time, playing, true);
   };
-  async function exportClip() {
-    await save();
+  async function exportClip(): Promise<void> {
+    setExportError('');
     setRendering(true);
-    await fetch(`/api/projects/${project.id}/clips/${clip.id}/render`, { method: 'POST' });
-    setTimeout(reload, 250);
+    downloadAfterRender.current = true;
+    try {
+      const saved = await save();
+      if (!saved.ok) throw new Error(await apiErrorMessage(saved, 'The latest clip changes could not be saved'));
+      const response = await fetch(`/api/projects/${project.id}/clips/${clip.id}/render`, { method: 'POST' });
+      if (!response.ok) throw new Error(await apiErrorMessage(response, 'The MP4 export could not be started'));
+      await Promise.resolve(reload());
+    } catch (error) {
+      downloadAfterRender.current = false;
+      setRendering(false);
+      setExportError(error instanceof Error ? error.message : 'The MP4 export could not be started.');
+    }
   }
   function togglePlay() {
     const video = videoRef.current;
@@ -366,8 +424,9 @@ function EditorView({ project, clipId, onDiscover, onChange, reload }: { project
     <div className="flex min-h-screen flex-col bg-[#09090b]">
       <header className="flex h-16 shrink-0 items-center justify-between border-b border-white/[0.07] px-4 lg:px-5">
         <div className="flex min-w-0 items-center gap-3"><button onClick={onDiscover} className="grid h-9 w-9 place-items-center rounded-xl text-white/40 transition hover:bg-white/[0.06] hover:text-white"><ArrowLeft className="h-4 w-4" /></button><div className="min-w-0"><p className="truncate text-sm font-medium">{project.name}</p><p className="mt-0.5 text-[10px] text-white/30">Editing · {formatDuration(draft.duration)}</p></div></div>
-        <div className="flex items-center gap-2"><span className="hidden text-[10px] text-white/25 sm:block">{saving ? 'Saving…' : 'All changes saved'}</span>{draft.status === 'complete' && draft.outputUrl ? <a href={draft.outputUrl} className="button-secondary !py-2"><Download className="h-4 w-4" /> Download</a> : <button onClick={exportClip} disabled={rendering || draft.status === 'rendering'} className="button-primary !py-2">{draft.status === 'rendering' || rendering ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />} {draft.status === 'rendering' ? `${draft.renderProgress}%` : 'Export MP4'}</button>}</div>
+        <div className="flex items-center gap-2"><span className="hidden text-[10px] text-white/25 sm:block">{saving ? 'Saving…' : 'All changes saved'}</span>{draft.status === 'complete' && draft.outputUrl ? <button onClick={() => startBrowserDownload(draft.outputUrl!, clipDownloadFilename(draft))} className="button-secondary !py-2"><Download className="h-4 w-4" /> Download MP4</button> : <button onClick={exportClip} disabled={rendering || draft.status === 'rendering'} className="button-primary !py-2">{draft.status === 'rendering' || rendering ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />} {draft.status === 'rendering' ? `${draft.renderProgress}%` : 'Export MP4'}</button>}</div>
       </header>
+      {exportError && <div className="border-b border-red-400/15 bg-red-400/[0.05] px-4 py-2 text-center text-xs text-red-300">{exportError}</div>}
 
       <div className="grid min-h-0 flex-1 lg:grid-cols-[220px_minmax(420px,1fr)_300px]">
         <aside className="hidden min-h-0 border-r border-white/[0.07] bg-[#0d0d10] lg:flex lg:flex-col">
@@ -457,7 +516,7 @@ function Timeline({ project, draft, playhead, setPlayhead, updateDraft, save, ad
 function SectionTitle({ children }: { children: React.ReactNode }) { return <p className="mb-3 text-[10px] font-semibold uppercase tracking-[.14em] text-white/32">{children}</p>; }
 function ChoiceGrid<T extends string>({ values, value, onChange }: { values: T[]; value: T; onChange: (value: T) => void }) { return <div className="grid grid-cols-2 gap-2">{values.map((item) => <button key={item} onClick={() => onChange(item)} className={`rounded-lg border px-2 py-2 text-[10px] capitalize transition ${value === item ? 'border-lime/25 bg-lime/[0.07] text-lime' : 'border-white/[0.07] bg-white/[0.025] text-white/35 hover:text-white/65'}`}>{item}</button>)}</div>; }
 
-function EditPanel({ project, draft, update, save, reload }: { project: Project; draft: Clip; update: <K extends keyof Clip>(key: K, value: Clip[K]) => void; save: (clip?: Clip) => Promise<void>; reload: () => void | Promise<void> }) {
+function EditPanel({ project, draft, update, save, reload }: { project: Project; draft: Clip; update: <K extends keyof Clip>(key: K, value: Clip[K]) => void; save: (clip?: Clip) => Promise<unknown>; reload: () => void | Promise<void> }) {
   const musicInput = useRef<HTMLInputElement>(null);
   const [uploadingMusic, setUploadingMusic] = useState(false);
   const [musicError, setMusicError] = useState('');
@@ -545,7 +604,7 @@ function CaptionPanel({ draft, update, save, onSeek }: { draft: Clip; update: <K
   </div>;
 }
 
-function PublishPanel({ projectId, draft, update, save, reload }: { projectId: string; draft: Clip; update: <K extends keyof Clip>(key: K, value: Clip[K]) => void; save: (clip?: Clip) => Promise<void>; reload: () => void | Promise<void> }) {
+function PublishPanel({ projectId, draft, update, save, reload }: { projectId: string; draft: Clip; update: <K extends keyof Clip>(key: K, value: Clip[K]) => void; save: (clip?: Clip) => Promise<unknown>; reload: () => void | Promise<void> }) {
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [publishing, setPublishing] = useState<PublishingProvider | null>(null);
   const [publishError, setPublishError] = useState('');

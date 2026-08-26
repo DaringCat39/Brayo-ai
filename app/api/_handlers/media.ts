@@ -36,7 +36,9 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
       if (!artifact) {
         return NextResponse.json({ error: 'File not found.', code: 'MEDIA_NOT_FOUND', retryable: false }, { status: 404 });
       }
-      const download = request.nextUrl.searchParams.get('download') === '1' ? filename : undefined;
+      const download = request.nextUrl.searchParams.get('download') === '1'
+        ? artifact.downloadFilename || filename
+        : undefined;
       const signedUrl = await signedObjectReadUrl(artifact.key, download);
       return Response.redirect(signedUrl, 307);
     } catch (error) {

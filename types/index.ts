@@ -53,6 +53,7 @@ export interface StoredMediaArtifact {
   provider: 'backblaze-b2';
   key: string;
   contentType: string;
+  downloadFilename?: string;
   size: number;
   etag: string;
   versionId?: string;

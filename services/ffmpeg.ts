@@ -542,7 +542,7 @@ export async function renderClip(
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    'superfast',
     '-crf',
     '20',
     '-c:a',

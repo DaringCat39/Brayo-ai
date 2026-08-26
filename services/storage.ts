@@ -85,6 +85,7 @@ export async function persistProjectMedia(
   filename: string,
   localPath: string,
   contentType: string,
+  downloadFilename?: string,
 ): Promise<StoredMediaArtifact | null> {
   if (!IS_VERCEL) return null;
   await assertCurrentProject(project.id);
@@ -97,6 +98,9 @@ export async function persistProjectMedia(
       Key: key,
       Body: createReadStream(localPath),
       ContentType: contentType,
+      ContentDisposition: downloadFilename
+        ? `attachment; filename="${path.basename(downloadFilename).replace(/["\\\r\n]/g, '_')}"`
+        : undefined,
       CacheControl: 'private, max-age=0, must-revalidate',
     },
     queueSize: 3,
@@ -114,6 +118,7 @@ export async function persistProjectMedia(
     provider: 'backblaze-b2',
     key,
     contentType,
+    downloadFilename,
     size: info.size,
     etag: stored.ETag || '',
     versionId: stored.VersionId,

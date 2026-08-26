@@ -3,7 +3,7 @@ import type { PublishingProvider } from '@/types';
 import { effectiveClipDuration, MIN_CLIP_SECONDS } from '@/lib/clip-duration';
 import { getIntegrationAccount, getProject, saveProject } from '@/lib/persistence';
 import { cleanupProjectWorkspace, projectDir } from '@/lib/paths';
-import { now } from '@/lib/utils';
+import { now, safeFilename } from '@/lib/utils';
 import { renderClip } from '@/services/ffmpeg';
 import { publishClip } from '@/services/publishing';
 import { materializeProjectMedia, persistProjectMedia, processingInputForVideo } from '@/services/storage';
@@ -66,7 +66,8 @@ export async function renderProjectClipStep(
       }),
     );
     await pendingProgressSave;
-    await persistProjectMedia(project, filename, outputPath, 'video/mp4');
+    const downloadBase = safeFilename(`Brayo-${clip.title}`).replace(/\.[^.]+$/, '').slice(0, 120) || 'Brayo-export';
+    await persistProjectMedia(project, filename, outputPath, 'video/mp4', `${downloadBase}.mp4`);
     const existingRenderMs = project.analysis?.timings?.rendering?.durationMs || 0;
     recordProjectTiming(project, 'rendering', existingRenderMs + rendered.durationMs, `${batchIndex + 1}/${batchTotal} clips rendered`);
     clip.status = 'complete';
